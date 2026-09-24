@@ -79,6 +79,9 @@ pub(crate) struct FmtVisitor<'a> {
     // FIXME: use an RAII util or closure for indenting
     pub(crate) block_indent: Indent,
     pub(crate) config: &'a Config,
+    /// One-shot exact blank-line override for the item currently being
+    /// visited, consumed by its first output-emitting call.
+    pending_exact_blank_lines: Option<usize>,
     pub(crate) is_if_else_block: bool,
     pub(crate) is_loop_block: bool,
     pub(crate) snippet_provider: &'a SnippetProvider,
@@ -158,7 +161,7 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
 
         match stmt.as_ast_node().kind {
             ast::StmtKind::Item(ref item) => {
-                self.visit_item(item);
+                self.visit_item(item, is_first_in_block);
                 self.last_pos = stmt.span().hi();
             }
             ast::StmtKind::Let(..) | ast::StmtKind::Expr(..) | ast::StmtKind::Semi(..) => {
@@ -422,7 +425,7 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
         };
 
         if let Some((fn_str, fn_brace_style)) = rewrite {
-            self.format_missing_with_indent(source!(self, s).lo());
+            self.take_pending_exact_blank_lines(source!(self, s).lo());
 
             if let Some(rw) = self.single_line_fn(&fn_str, block, inner_attrs) {
                 self.push_str(&rw);
@@ -440,14 +443,20 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
             }
             self.last_pos = source!(self, block.span).lo();
         } else {
+            // The signature is re-emitted raw below; keep source spacing.
+            self.pending_exact_blank_lines = None;
             self.format_missing(source!(self, block.span).lo());
         }
 
         self.visit_block(block, inner_attrs, true)
     }
 
-    pub(crate) fn visit_item(&mut self, item: &ast::Item) {
+    pub(crate) fn visit_item(&mut self, item: &ast::Item, is_first_item: bool) {
         skip_out_of_file_lines_range_visitor!(self, item.span);
+
+        // Pending exact blank-line override for the boundary before this item;
+        // consumed by its first output-emitting call (attributes or the item).
+        self.pending_exact_blank_lines = self.exact_blank_lines_before_item(item, is_first_item);
 
         // This is where we bail out if there is a skip attribute. This is only
         // complex in the module case. It is complex because the module could be
@@ -533,7 +542,7 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
                     self.visit_struct(&StructParts::from_item(item));
                 }
                 ast::ItemKind::Enum(ident, ref generics, ref def) => {
-                    self.format_missing_with_indent(source!(self, item.span).lo());
+                    self.take_pending_exact_blank_lines(source!(self, item.span).lo());
                     self.visit_enum(ident, &item.vis, def, generics, item.span);
                     self.last_pos = source!(self, item.span).hi();
                 }
@@ -642,6 +651,9 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
             };
         }
         self.skip_context = skip_context_saved;
+        // Any unconsumed override (e.g. a fully skipped item) must not leak to
+        // the next item.
+        self.pending_exact_blank_lines = None;
     }
 
     fn visit_ty_alias_kind(
@@ -663,7 +675,12 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
         self.push_rewrite(span, rewrite);
     }
 
-    fn visit_assoc_item(&mut self, ai: &ast::AssocItem, visitor_kind: ItemVisitorKind) {
+    fn visit_assoc_item(
+        &mut self,
+        ai: &ast::AssocItem,
+        visitor_kind: ItemVisitorKind,
+        is_first_item: bool,
+    ) {
         use ItemVisitorKind::*;
         let assoc_ctxt = match visitor_kind {
             AssocTraitItem => visit::AssocCtxt::Trait,
@@ -674,6 +691,11 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
         // TODO(calebcartwright): Not sure the skip spans are correct
         let skip_span = ai.span;
         skip_out_of_file_lines_range_visitor!(self, ai.span);
+
+        // Pending exact blank-line override for the boundary before this
+        // member; consumed by its first output-emitting call.
+        self.pending_exact_blank_lines =
+            self.exact_blank_lines_before_assoc_item(ai, is_first_item);
 
         if self.visit_attrs(&ai.attrs, ast::AttrStyle::Outer) {
             self.push_skipped_with_span(ai.attrs.as_slice(), skip_span, skip_span);
@@ -736,14 +758,17 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
                 self.push_rewrite(ai.span, None);
             }
         }
+        // Any unconsumed override (e.g. a fully skipped member) must not leak
+        // to the next member.
+        self.pending_exact_blank_lines = None;
     }
 
-    pub(crate) fn visit_trait_item(&mut self, ti: &ast::AssocItem) {
-        self.visit_assoc_item(ti, ItemVisitorKind::AssocTraitItem);
+    pub(crate) fn visit_trait_item(&mut self, ti: &ast::AssocItem, is_first_item: bool) {
+        self.visit_assoc_item(ti, ItemVisitorKind::AssocTraitItem, is_first_item);
     }
 
-    pub(crate) fn visit_impl_item(&mut self, ii: &ast::AssocItem) {
-        self.visit_assoc_item(ii, ItemVisitorKind::AssocImplItem);
+    pub(crate) fn visit_impl_item(&mut self, ii: &ast::AssocItem, is_first_item: bool) {
+        self.visit_assoc_item(ii, ItemVisitorKind::AssocImplItem, is_first_item);
     }
 
     fn visit_mac(&mut self, mac: &ast::MacCall, pos: MacroPosition) {
@@ -792,8 +817,27 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
         self.last_pos = source!(self, span).hi();
     }
 
+    /// Applies the pending exact blank-line override at the boundary before
+    /// `lo`, consuming it. Items may emit their leading gap through several
+    /// calls (attributes first, then the item itself), so the first of them
+    /// takes the override and later ones fall back to the ordinary behavior.
+    fn take_pending_exact_blank_lines(&mut self, lo: BytePos) {
+        match self.pending_exact_blank_lines.take() {
+            Some(blank_lines) if lo > self.last_pos => {
+                self.format_missing_with_indent_and_blank_lines(lo, blank_lines);
+            }
+            Some(blank_lines) => {
+                // Zero-length gap: `format_missing_inner` returns early before
+                // its vertical-whitespace handling, so force the run here.
+                self.set_trailing_newlines(blank_lines.saturating_add(1));
+                self.push_str(&self.block_indent.to_string(self.config));
+            }
+            None => self.format_missing_with_indent(lo),
+        }
+    }
+
     pub(crate) fn push_rewrite(&mut self, span: Span, rewrite: Option<String>) {
-        self.format_missing_with_indent(source!(self, span).lo());
+        self.take_pending_exact_blank_lines(source!(self, span).lo());
         self.push_rewrite_inner(span, rewrite);
     }
 
@@ -840,6 +884,100 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
         Some(blank_lines)
     }
 
+    /// Whether the item kind qualifies for `blank_lines_between_items`.
+    /// Reorderable kinds (`use`, `extern crate`, `mod`) and smaller items
+    /// (`const`, `static`, macros, foreign modules) are intentionally
+    /// unclassified: reordering rebuilds their boundaries through its own
+    /// output path.
+    pub(crate) fn is_between_items_candidate(item: &ast::Item) -> bool {
+        matches!(
+            item.kind,
+            ast::ItemKind::Fn(..)
+                | ast::ItemKind::Impl(..)
+                | ast::ItemKind::Struct(..)
+                | ast::ItemKind::Enum(..)
+                | ast::ItemKind::Union(..)
+                | ast::ItemKind::Trait(..)
+                | ast::ItemKind::TyAlias(..)
+        )
+    }
+
+    /// Whether the associated-item kind qualifies for `blank_lines_between_items`.
+    pub(crate) fn is_assoc_item_between_items_candidate(ai: &ast::AssocItem) -> bool {
+        matches!(
+            ai.kind,
+            ast::AssocItemKind::Fn(..) | ast::AssocItemKind::Type(..)
+        )
+    }
+
+    /// Decides whether the boundary before an item qualifies for the exact
+    /// `blank_lines_between_items` spacing, returning the configured count.
+    /// The gap runs up to the first attribute so the forced blank lines land
+    /// before the attribute group.
+    fn exact_blank_lines_before_item(
+        &self,
+        item: &ast::Item,
+        is_first_item: bool,
+    ) -> Option<usize> {
+        if is_first_item || !Self::is_between_items_candidate(item) {
+            return None;
+        }
+        let blank_lines = self.config.blank_lines_between_items();
+        if blank_lines == 0 && !self.config.was_set().blank_lines_between_items() {
+            return None;
+        }
+        self.item_boundary_gap_allows_exact_blank_lines(item.attrs.as_slice(), item.span)
+    }
+
+    /// Same as `exact_blank_lines_before_item` for `trait`/`impl` members.
+    fn exact_blank_lines_before_assoc_item(
+        &self,
+        ai: &ast::AssocItem,
+        is_first_item: bool,
+    ) -> Option<usize> {
+        if is_first_item || !Self::is_assoc_item_between_items_candidate(ai) {
+            return None;
+        }
+        let blank_lines = self.config.blank_lines_between_items();
+        if blank_lines == 0 && !self.config.was_set().blank_lines_between_items() {
+            return None;
+        }
+        self.item_boundary_gap_allows_exact_blank_lines(ai.attrs.as_slice(), ai.span)
+    }
+
+    /// Requires the source gap from `last_pos` up to (the first attribute of)
+    /// `span` to contain only whitespace and comments inside the selected
+    /// file lines.
+    fn item_boundary_gap_allows_exact_blank_lines(
+        &self,
+        attrs: &[ast::Attribute],
+        span: Span,
+    ) -> Option<usize> {
+        let span_with_attrs = if attrs.is_empty() {
+            span
+        } else {
+            mk_sp(attrs[0].span.lo(), span.hi())
+        };
+        let gap = mk_sp(self.last_pos, source!(self, span_with_attrs).lo());
+        if gap.lo() > gap.hi() {
+            // Pathological span ordering; leave the ordinary path to surface
+            // its own diagnostic.
+            return None;
+        }
+        if out_of_file_lines_range!(self, gap) {
+            return None;
+        }
+        let gap_snippet = self.snippet(gap);
+        if CommentCodeSlices::new(gap_snippet)
+            .any(|(kind, _, subslice)| kind == CodeCharKind::Normal && !subslice.trim().is_empty())
+        {
+            // The gap contains code we could not format; fall back to the
+            // ordinary path.
+            return None;
+        }
+        Some(self.config.blank_lines_between_items())
+    }
+
     /// Like `push_rewrite`, but the vertical whitespace at the boundary before
     /// `span` is forced to exactly `blank_lines` empty lines.
     fn push_rewrite_with_blank_lines(
@@ -853,7 +991,7 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
             // Zero-length gap: `format_missing_inner` returns early before
             // its vertical-whitespace handling, so force the exact run and
             // the indentation here.
-            self.set_trailing_newlines(blank_lines);
+            self.set_trailing_newlines(blank_lines.saturating_add(1));
             self.push_str(&self.block_indent.to_string(self.config));
             self.push_rewrite_inner(span, rewrite);
             return;
@@ -868,6 +1006,8 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
         item_span: Span,
         main_span: Span,
     ) {
+        // Skipped items keep their source spacing.
+        self.pending_exact_blank_lines = None;
         self.format_missing_with_indent(source!(self, item_span).lo());
         // do not take into account the lines with attributes as part of the skipped range
         let attrs_end = attrs
@@ -919,6 +1059,7 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
             last_pos: BytePos(0),
             block_indent: Indent::empty(),
             config,
+            pending_exact_blank_lines: None,
             is_if_else_block: false,
             is_loop_block: false,
             snippet_provider,
@@ -998,8 +1139,8 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
         !is_skip_attr(segments)
     }
 
-    fn walk_mod_items(&mut self, items: &[Box<ast::Item>]) {
-        self.visit_items_with_reordering(&ptr_vec_to_ref_vec(items));
+    fn walk_mod_items(&mut self, items: &[Box<ast::Item>], is_first_item: bool) {
+        self.visit_items_with_reordering(&ptr_vec_to_ref_vec(items), is_first_item);
     }
 
     fn walk_stmts(
@@ -1045,7 +1186,7 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
 
             self.walk_stmts(&stmts[1..], include_next_empty, false);
         } else {
-            self.visit_items_with_reordering(&items);
+            self.visit_items_with_reordering(&items, is_first_in_block);
             self.walk_stmts(&stmts[items.len()..], false, false);
         }
     }
@@ -1095,7 +1236,7 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
                 self.last_pos = mod_lo;
                 self.block_indent = self.block_indent.block_indent(self.config);
                 self.visit_attrs(attrs, ast::AttrStyle::Inner);
-                self.walk_mod_items(items);
+                self.walk_mod_items(items, true);
                 let missing_span = self.next_span(inner_span.hi() - BytePos(1));
                 self.close_block(missing_span, false);
             }
@@ -1113,7 +1254,7 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
             !skipped,
             "Skipping module must be handled before reaching this line."
         );
-        self.walk_mod_items(&m.items);
+        self.walk_mod_items(&m.items, true);
         self.format_missing_with_indent(end_pos);
     }
 

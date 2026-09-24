@@ -81,6 +81,44 @@ fn main() {
 }
 ```
 
+## `blank_lines_between_items`
+
+Number of blank lines to insert between adjacent standalone items (`fn`, `impl`, `struct`, `enum`,
+`union`, `trait`, and `type`). When set, this exact number of blank lines is enforced before such
+items, taking precedence over [`blank_lines_lower_bound`](#blank_lines_lower_bound) and
+[`blank_lines_upper_bound`](#blank_lines_upper_bound) at those boundaries. No blank lines are added
+before the first item of a container, before `use` items, or before items of other kinds (such as
+`const`, `static`, `macro` calls, or `mod` declarations). The first item inside a `trait` or `impl`
+body is left alone; later qualifying members receive the exact spacing.
+
+- **Default value**: `0`
+- **Possible values**: any non-negative integer
+- **Stable**: No (tracking issue: [#7120](https://github.com/rust-lang/rustfmt/issues/7120))
+
+### Example
+Original Code (rustfmt will not change it with the default value of `0`):
+
+```rust
+#![rustfmt::skip]
+
+fn first() {}
+
+struct Point {
+    x: i32,
+}
+```
+
+#### `2`
+```rust
+fn first() {}
+
+
+struct Point {
+    x: i32,
+}
+```
+
+
 ## `blank_lines_before_control_flow_statements`
 
 Number of blank lines to insert before standalone `if`, `match`, `loop`, `while`, and `for` statements.

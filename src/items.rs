@@ -739,7 +739,7 @@ impl<'a> FmtVisitor<'a> {
             // Create visitor for each items, then reorder them.
             let mut buffer = vec![];
             for item in items {
-                self.visit_impl_item(item);
+                self.visit_impl_item(item, false);
                 buffer.push((self.buffer.clone(), item.clone()));
                 self.buffer.clear();
             }
@@ -770,7 +770,23 @@ impl<'a> FmtVisitor<'a> {
             for (buf, item) in buffer {
                 // Make sure that there are at least a single empty line between
                 // different impl items.
-                if prev_kind
+                let exact_blank_lines =
+                    if prev_kind.is_some() && Self::is_assoc_item_between_items_candidate(&item) {
+                        let blank_lines = self.config.blank_lines_between_items();
+                        if blank_lines > 0 || self.config.was_set().blank_lines_between_items() {
+                            Some(blank_lines)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                if let Some(blank_lines) = exact_blank_lines {
+                    // Reordering discards the source gap; rebuild the boundary
+                    // with the exact count. The indentation below contributes
+                    // one more newline, so the run here is `blank_lines` long.
+                    self.set_trailing_newlines(blank_lines);
+                } else if prev_kind
                     .as_ref()
                     .map_or(false, |prev_kind| need_empty_line(prev_kind, &item.kind))
                 {
@@ -782,8 +798,8 @@ impl<'a> FmtVisitor<'a> {
                 prev_kind = Some(item.kind.clone());
             }
         } else {
-            for item in items {
-                self.visit_impl_item(item);
+            for (index, item) in items.iter().enumerate() {
+                self.visit_impl_item(item, index == 0);
             }
         }
     }
@@ -1314,8 +1330,8 @@ pub(crate) fn format_trait(
         visitor.block_indent = offset.block_only().block_indent(context.config);
         visitor.last_pos = block_span.lo() + BytePos(open_pos as u32);
 
-        for item in items {
-            visitor.visit_trait_item(item);
+        for (index, item) in items.iter().enumerate() {
+            visitor.visit_trait_item(item, index == 0);
         }
 
         visitor.format_missing(item.span.hi() - BytePos(1));

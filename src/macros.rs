@@ -82,7 +82,9 @@ impl Rewrite for ast::Item {
         let mut visitor = crate::visitor::FmtVisitor::from_context(context);
         visitor.block_indent = shape.indent;
         visitor.last_pos = self.span().lo();
-        visitor.visit_item(self);
+        // The item is rewritten standalone; treat it as first so the exact
+        // between-items spacing never applies inside macro rewrites.
+        visitor.visit_item(self, true);
         Ok(visitor.buffer.to_owned())
     }
 }
@@ -1538,12 +1540,14 @@ fn rewrite_macro_with_items(
     visitor.last_pos = context
         .snippet_provider
         .span_after(span, original_opener.trim());
+    let mut item_index = 0;
     for item in items {
         let item = match item {
             MacroArg::Item(item) => item,
             _ => return Err(RewriteError::Unknown),
         };
-        visitor.visit_item(item);
+        visitor.visit_item(item, item_index == 0);
+        item_index += 1;
     }
 
     let mut result = String::with_capacity(256);

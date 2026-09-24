@@ -143,7 +143,7 @@ impl<'a> FmtVisitor<'a> {
                 Some(blank_lines) => {
                     // The exact count must not go through `push_vertical_spaces`,
                     // which clamps via the global blank-line bounds.
-                    self.set_trailing_newlines(blank_lines);
+                    self.set_trailing_newlines(blank_lines.saturating_add(1));
                 }
                 None => self.push_vertical_spaces(count_newlines(snippet)),
             }
@@ -156,11 +156,12 @@ impl<'a> FmtVisitor<'a> {
     /// Rewrites the trailing run of newline characters in the output buffer so
     /// that it is exactly `newline_count` long, and adjusts `line_number` by
     /// the same delta. Unlike `push_vertical_spaces`, this never consults the
-    /// global `blank_lines_lower_bound`/`blank_lines_upper_bound`.
+    /// global `blank_lines_lower_bound`/`blank_lines_upper_bound`. The count is
+    /// clamped at `isize::MAX` so the arithmetic below cannot wrap for absurd
+    /// configuration values; callers pass `blank_lines.saturating_add(1)` for
+    /// the statement/item boundary semantics.
     pub(crate) fn set_trailing_newlines(&mut self, newline_count: usize) {
-        // Saturate at `isize::MAX` so the `isize` arithmetic below cannot wrap
-        // for absurd configuration values.
-        let newline_count = newline_count.saturating_add(1).min(isize::MAX as usize);
+        let newline_count = newline_count.min(isize::MAX as usize);
         let trailing = self.buffer.chars().rev().take_while(|c| *c == '\n').count();
         let delta = newline_count as isize - trailing as isize;
         if delta > 0 {
@@ -279,7 +280,7 @@ impl<'a> FmtVisitor<'a> {
                 if let Some(blank_lines) = exact_blank_lines {
                     // This is the first vertical boundary inside the gap;
                     // force it to the exact count, bypassing the global bounds.
-                    self.set_trailing_newlines(blank_lines);
+                    self.set_trailing_newlines(blank_lines.saturating_add(1));
                     exact_blank_lines = None;
                 } else {
                     self.push_vertical_spaces(newline_count);
@@ -301,7 +302,7 @@ impl<'a> FmtVisitor<'a> {
                 // The gap ended without an intermediate vertical boundary (e.g. a
                 // trailing comment directly abutting the statement); force the
                 // exact count just before the statement's indentation.
-                self.set_trailing_newlines(blank_lines);
+                self.set_trailing_newlines(blank_lines.saturating_add(1));
             }
             process_last_snippet(self, last_snippet, snippet);
         } else {
@@ -343,7 +344,7 @@ impl<'a> FmtVisitor<'a> {
                     let first = subslice[..newline_offset].trim_start();
                     self.push_str(" ");
                     self.push_str(first);
-                    self.set_trailing_newlines(blank_lines);
+                    self.set_trailing_newlines(blank_lines.saturating_add(1));
                     *exact = None;
                     let rest_shape =
                         Shape::indented(self.block_indent, self.config).comment(self.config);

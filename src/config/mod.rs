@@ -157,6 +157,8 @@ create_config! {
         "Minimum number of blank lines which must be put between items";
     blank_lines_before_control_flow_statements: BlankLinesBeforeControlFlowStatements, false,
         "Number of blank lines to insert before control flow statements";
+    blank_lines_between_items: BlankLinesBetweenItems, false,
+        "Number of blank lines to insert between items";
     edition: EditionConfig, true, "The edition of the parser (RFC 2052)";
     style_edition: StyleEditionConfig, true, "The edition of the Style Guide (RFC 3338)";
     version: VersionConfig, false, "Version of formatting rules";
@@ -819,6 +821,7 @@ match_block_trailing_comma = false
 blank_lines_upper_bound = 1
 blank_lines_lower_bound = 0
 blank_lines_before_control_flow_statements = 0
+blank_lines_between_items = 0
 edition = "2015"
 style_edition = "2015"
 version = "One"
@@ -913,6 +916,7 @@ match_block_trailing_comma = false
 blank_lines_upper_bound = 1
 blank_lines_lower_bound = 0
 blank_lines_before_control_flow_statements = 0
+blank_lines_between_items = 0
 edition = "2015"
 style_edition = "2024"
 version = "Two"
