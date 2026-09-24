@@ -10,6 +10,7 @@ on:
       - "**/Cargo.lock"
       - "build.rs"
       - "tests/**"
+      - "release-plz.toml"
   workflow_dispatch:
 
 jobs:

@@ -1,4 +1,8 @@
 [workspace]
+# Determine the released version from git tags instead of the cargo registry:
+# this fork is never published to crates.io, so registry-based version
+# detection reports the package as already released and skips the release PR.
+git_only = true
 # Append release notes for the fork to the existing changelog.
 changelog_update = true
 changelog_path = "CHANGELOG.md"
