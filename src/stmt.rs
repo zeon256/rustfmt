@@ -71,6 +71,25 @@ impl<'a> Stmt<'a> {
         matches!(self.inner.kind, ast::StmtKind::Empty)
     }
 
+    /// Returns `true` only for standalone control-flow statements: an `Expr` or
+    /// `Semi` statement whose top-level expression is `if`, `match`, `loop`,
+    /// `while`, or `for`. Control-flow expressions embedded in another
+    /// statement (e.g. `let x = if ...`, `return if ...`) or plain blocks do
+    /// not qualify.
+    pub(crate) fn is_control_flow(&self) -> bool {
+        match &self.inner.kind {
+            ast::StmtKind::Expr(expr) | ast::StmtKind::Semi(expr) => matches!(
+                expr.kind,
+                ast::ExprKind::If(..)
+                    | ast::ExprKind::Match(..)
+                    | ast::ExprKind::Loop(..)
+                    | ast::ExprKind::While(..)
+                    | ast::ExprKind::ForLoop(..)
+            ),
+            _ => false,
+        }
+    }
+
     fn is_last_expr(&self) -> bool {
         if !self.is_last {
             return false;

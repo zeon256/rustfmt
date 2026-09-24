@@ -48,39 +48,65 @@ impl<'a> FmtVisitor<'a> {
             self.last_pos = end;
             return;
         }
-        self.format_missing_inner(end, |this, last_snippet, _| this.push_str(last_snippet))
+        self.format_missing_inner(
+            end,
+            |this, last_snippet, _| this.push_str(last_snippet),
+            None,
+        )
     }
 
     pub(crate) fn format_missing_with_indent(&mut self, end: BytePos) {
-        self.format_missing_indent(end, true)
+        self.format_missing_indent(end, true, None)
     }
 
     pub(crate) fn format_missing_no_indent(&mut self, end: BytePos) {
-        self.format_missing_indent(end, false)
+        self.format_missing_indent(end, false, None)
     }
 
-    fn format_missing_indent(&mut self, end: BytePos, should_indent: bool) {
+    /// Like `format_missing_with_indent`, but forces the vertical whitespace
+    /// at the first line break inside the missing span to consist of exactly
+    /// `blank_lines` empty lines, regardless of the global
+    /// `blank_lines_lower_bound`/`blank_lines_upper_bound`.
+    pub(crate) fn format_missing_with_indent_and_blank_lines(
+        &mut self,
+        end: BytePos,
+        blank_lines: usize,
+    ) {
+        self.format_missing_indent(end, true, Some(blank_lines))
+    }
+
+    fn format_missing_indent(
+        &mut self,
+        end: BytePos,
+        should_indent: bool,
+        exact_blank_lines: Option<usize>,
+    ) {
         let config = self.config;
-        self.format_missing_inner(end, |this, last_snippet, snippet| {
-            this.push_str(last_snippet.trim_end());
-            if last_snippet == snippet
-                && !this.output_at_start()
-                && !out_of_file_lines_range!(this, mk_sp(this.last_pos, end))
-            {
-                // No new lines in the snippet.
-                this.push_str("\n");
-            }
-            if should_indent {
-                let indent = this.block_indent.to_string(config);
-                this.push_str(&indent);
-            }
-        })
+        self.format_missing_inner(
+            end,
+            |this, last_snippet, snippet| {
+                this.push_str(last_snippet.trim_end());
+                if last_snippet == snippet
+                    && !this.output_at_start()
+                    && !out_of_file_lines_range!(this, mk_sp(this.last_pos, end))
+                {
+                    // No new lines in the snippet.
+                    this.push_str("\n");
+                }
+                if should_indent {
+                    let indent = this.block_indent.to_string(config);
+                    this.push_str(&indent);
+                }
+            },
+            exact_blank_lines,
+        );
     }
 
     fn format_missing_inner<F: Fn(&mut FmtVisitor<'_>, &str, &str)>(
         &mut self,
         end: BytePos,
         process_last_snippet: F,
+        mut exact_blank_lines: Option<usize>,
     ) {
         let start = self.last_pos;
 
@@ -113,10 +139,36 @@ impl<'a> FmtVisitor<'a> {
 
         if snippet.trim().is_empty() && !out_of_file_lines_range!(self, span) {
             // Keep vertical spaces within range.
-            self.push_vertical_spaces(count_newlines(snippet));
+            match exact_blank_lines.take() {
+                Some(blank_lines) => {
+                    // The exact count must not go through `push_vertical_spaces`,
+                    // which clamps via the global blank-line bounds.
+                    self.set_trailing_newlines(blank_lines);
+                }
+                None => self.push_vertical_spaces(count_newlines(snippet)),
+            }
             process_last_snippet(self, "", snippet);
         } else {
-            self.write_snippet(span, &process_last_snippet);
+            self.write_snippet(span, &process_last_snippet, exact_blank_lines);
+        }
+    }
+
+    /// Rewrites the trailing run of newline characters in the output buffer so
+    /// that it is exactly `newline_count` long, and adjusts `line_number` by
+    /// the same delta. Unlike `push_vertical_spaces`, this never consults the
+    /// global `blank_lines_lower_bound`/`blank_lines_upper_bound`.
+    pub(crate) fn set_trailing_newlines(&mut self, newline_count: usize) {
+        // Saturate at `isize::MAX` so the `isize` arithmetic below cannot wrap
+        // for absurd configuration values.
+        let newline_count = newline_count.saturating_add(1).min(isize::MAX as usize);
+        let trailing = self.buffer.chars().rev().take_while(|c| *c == '\n').count();
+        let delta = newline_count as isize - trailing as isize;
+        if delta > 0 {
+            self.push_str(&"\n".repeat(delta as usize));
+        } else if delta < 0 {
+            let new_len = self.buffer.len() - (-delta) as usize;
+            self.buffer.truncate(new_len);
+            self.line_number = self.line_number.wrapping_add_signed(delta);
         }
     }
 
@@ -143,8 +195,12 @@ impl<'a> FmtVisitor<'a> {
         self.push_str(&blank_lines);
     }
 
-    fn write_snippet<F>(&mut self, span: Span, process_last_snippet: F)
-    where
+    fn write_snippet<F>(
+        &mut self,
+        span: Span,
+        process_last_snippet: F,
+        exact_blank_lines: Option<usize>,
+    ) where
         F: Fn(&mut FmtVisitor<'_>, &str, &str),
     {
         // Get a snippet from the file start to the span's hi without allocating.
@@ -158,7 +214,14 @@ impl<'a> FmtVisitor<'a> {
 
         debug!("write_snippet `{}`", snippet);
 
-        self.write_snippet_inner(big_snippet, snippet, big_diff, span, process_last_snippet);
+        self.write_snippet_inner(
+            big_snippet,
+            snippet,
+            big_diff,
+            span,
+            process_last_snippet,
+            exact_blank_lines,
+        );
     }
 
     fn write_snippet_inner<F>(
@@ -168,6 +231,7 @@ impl<'a> FmtVisitor<'a> {
         big_diff: usize,
         span: Span,
         process_last_snippet: F,
+        mut exact_blank_lines: Option<usize>,
     ) where
         F: Fn(&mut FmtVisitor<'_>, &str, &str),
     {
@@ -208,10 +272,18 @@ impl<'a> FmtVisitor<'a> {
                     &big_snippet[..(offset + big_diff)],
                     offset,
                     subslice,
+                    &mut exact_blank_lines,
                 );
             } else if subslice.trim().is_empty() && newline_count > 0 && within_file_lines_range {
                 // 2: blank lines.
-                self.push_vertical_spaces(newline_count);
+                if let Some(blank_lines) = exact_blank_lines {
+                    // This is the first vertical boundary inside the gap;
+                    // force it to the exact count, bypassing the global bounds.
+                    self.set_trailing_newlines(blank_lines);
+                    exact_blank_lines = None;
+                } else {
+                    self.push_vertical_spaces(newline_count);
+                }
                 status.cur_line += newline_count;
                 // To avoid any issues with whitespace unicode chars just add the len of the slice
                 status.line_start = offset + subslice.len()
@@ -225,6 +297,12 @@ impl<'a> FmtVisitor<'a> {
         let (_, _, within_file_lines_range) =
             slice_within_file_lines_range(self.config.file_lines(), status.cur_line, last_snippet);
         if within_file_lines_range {
+            if let Some(blank_lines) = exact_blank_lines.take() {
+                // The gap ended without an intermediate vertical boundary (e.g. a
+                // trailing comment directly abutting the statement); force the
+                // exact count just before the statement's indentation.
+                self.set_trailing_newlines(blank_lines);
+            }
             process_last_snippet(self, last_snippet, snippet);
         } else {
             // just append what's left
@@ -239,6 +317,7 @@ impl<'a> FmtVisitor<'a> {
         big_snippet: &str,
         offset: usize,
         subslice: &str,
+        exact: &mut Option<usize>,
     ) {
         let last_char = big_snippet
             .chars()
@@ -247,8 +326,39 @@ impl<'a> FmtVisitor<'a> {
 
         let fix_indent = last_char.map_or(true, |rev_c| ['{', '\n'].contains(&rev_c));
         let mut on_same_line = false;
+        let mut emitted_by_exact = false;
 
-        let comment_indent = if fix_indent {
+        // The first comment in the gap may begin on the same line as the
+        // previously formatted code and continue onto the following lines.
+        // When the exact blank-line override is pending, keep only its first
+        // line attached to the previous statement, force the exact run right
+        // after it, and re-emit the remaining lines as leading comments of
+        // the upcoming statement. A same-line comment whose slice ends at its
+        // terminating newline is left to the later vertical-boundary logic,
+        // which replaces the boundary run exactly.
+        if let (false, Some(blank_lines)) = (fix_indent, *exact) {
+            if let Some(newline_offset) = subslice.find('\n') {
+                let rest = &subslice[newline_offset + 1..];
+                if !rest.trim().is_empty() {
+                    let first = subslice[..newline_offset].trim_start();
+                    self.push_str(" ");
+                    self.push_str(first);
+                    self.set_trailing_newlines(blank_lines);
+                    *exact = None;
+                    let rest_shape =
+                        Shape::indented(self.block_indent, self.config).comment(self.config);
+                    let rest_str = rewrite_comment(rest, false, rest_shape, self.config)
+                        .unwrap_or_else(|_| String::from(rest));
+                    self.push_str(&self.block_indent.to_string(self.config));
+                    self.push_str(&rest_str);
+                    emitted_by_exact = true;
+                }
+            }
+        }
+
+        let comment_indent = if emitted_by_exact {
+            self.block_indent
+        } else if fix_indent {
             if let Some('{') = last_char {
                 self.push_str("\n");
             }
@@ -274,32 +384,34 @@ impl<'a> FmtVisitor<'a> {
 
         let comment_shape = Shape::indented(comment_indent, self.config).comment(self.config);
 
-        if on_same_line {
-            match subslice.find('\n') {
-                None => {
-                    self.push_str(subslice);
-                }
-                Some(offset) if offset + 1 == subslice.len() => {
-                    self.push_str(&subslice[..offset]);
-                }
-                Some(offset) => {
-                    // keep first line as is: if it were too long and wrapped, it may get mixed
-                    // with the other lines.
-                    let first_line = &subslice[..offset];
-                    self.push_str(first_line);
-                    self.push_str(&comment_indent.to_string_with_newline(self.config));
+        if !emitted_by_exact {
+            if on_same_line {
+                match subslice.find('\n') {
+                    None => {
+                        self.push_str(subslice);
+                    }
+                    Some(offset) if offset + 1 == subslice.len() => {
+                        self.push_str(&subslice[..offset]);
+                    }
+                    Some(offset) => {
+                        // keep first line as is: if it were too long and wrapped, it may get mixed
+                        // with the other lines.
+                        let first_line = &subslice[..offset];
+                        self.push_str(first_line);
+                        self.push_str(&comment_indent.to_string_with_newline(self.config));
 
-                    let other_lines = &subslice[offset + 1..];
-                    let comment_str =
-                        rewrite_comment(other_lines, false, comment_shape, self.config)
-                            .unwrap_or_else(|_| String::from(other_lines));
-                    self.push_str(&comment_str);
+                        let other_lines = &subslice[offset + 1..];
+                        let comment_str =
+                            rewrite_comment(other_lines, false, comment_shape, self.config)
+                                .unwrap_or_else(|_| String::from(other_lines));
+                        self.push_str(&comment_str);
+                    }
                 }
+            } else {
+                let comment_str = rewrite_comment(subslice, false, comment_shape, self.config)
+                    .unwrap_or_else(|_| String::from(subslice));
+                self.push_str(&comment_str);
             }
-        } else {
-            let comment_str = rewrite_comment(subslice, false, comment_shape, self.config)
-                .unwrap_or_else(|_| String::from(subslice));
-            self.push_str(&comment_str);
         }
 
         status.last_wspace = None;

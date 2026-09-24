@@ -81,6 +81,47 @@ fn main() {
 }
 ```
 
+## `blank_lines_before_control_flow_statements`
+
+Number of blank lines to insert before standalone `if`, `match`, `loop`, `while`, and `for` statements.
+When set, this exact number of blank lines is enforced before such statements, taking precedence over
+[`blank_lines_lower_bound`](#blank_lines_lower_bound) and
+[`blank_lines_upper_bound`](#blank_lines_upper_bound) at those boundaries. No blank lines are added
+immediately after an opening brace, before `else`, or around control-flow expressions used inside another
+statement (such as `let x = if ...`).
+
+- **Default value**: `0`
+- **Possible values**: any non-negative integer
+- **Stable**: No (tracking issue: [#7120](https://github.com/rust-lang/rustfmt/issues/7120))
+
+### Example
+Original Code (rustfmt will not change it with the default value of `0`):
+
+```rust
+#![rustfmt::skip]
+
+fn main() {
+    let values = [1, 2];
+    // Iterate.
+    for value in values {
+        println!("{value}");
+    }
+}
+```
+
+#### `1`
+```rust
+fn main() {
+    let values = [1, 2];
+
+    // Iterate.
+    for value in values {
+        println!("{value}");
+    }
+}
+```
+
+
 ## `blank_lines_lower_bound`
 
 Minimum number of blank lines which must be put between items. If two items have fewer blank lines between

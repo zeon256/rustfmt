@@ -1,0 +1,12 @@
+[workspace]
+# Append release notes for the fork to the existing changelog.
+changelog_update = true
+changelog_path = "CHANGELOG.md"
+# Create a git tag and a GitHub release for each release.
+git_release_enable = true
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
+# GitHub binaries only: upstream rust-lang owns `rustfmt-nightly` on crates.io,
+# so this fork must never attempt to publish to a registry.
+publish = false

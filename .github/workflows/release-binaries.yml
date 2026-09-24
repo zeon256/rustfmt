@@ -1,62 +1,90 @@
-name: upload
+name: Release Binaries
 
 on:
-  push:
-  release:
-    types: [created]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag to build and upload (e.g. v1.12.0)
+        required: true
+        type: string
+  release:
+    types: [published]
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  CARGO_TERM_COLOR: always
+  RUSTUP_MAX_RETRIES: 10
+  RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+
+permissions: {}
+
+concurrency:
+  group: release-binaries-${{ inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   build-release:
-    name: build-release
+    name: ${{ matrix.build }}
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.event.release.tag_name, 'v')
     strategy:
+      fail-fast: false
       matrix:
         build: [linux-x86_64, macos-x86_64, windows-x86_64-gnu, windows-x86_64-msvc]
         include:
           - build: linux-x86_64
             os: ubuntu-latest
-            rust: nightly
             target: x86_64-unknown-linux-gnu
           - build: macos-x86_64
             os: macos-latest
-            rust: nightly
             target: x86_64-apple-darwin
           - build: windows-x86_64-gnu
             os: windows-latest
-            rust: nightly-x86_64-gnu
             target: x86_64-pc-windows-gnu
           - build: windows-x86_64-msvc
             os: windows-latest
-            rust: nightly-x86_64-msvc
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
 
-        # Run build
-      - name: install rustup
+      - name: Install rustup
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs > rustup-init.sh
           sh rustup-init.sh -y --default-toolchain none
-          rustup target add ${{ matrix.target }}
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
+      # The crate links rustc_private internals, so the build must run with the
+      # toolchain pinned in rust-toolchain.toml (nightly + llvm-tools + rustc-dev).
+      # rustup fetches it automatically on first cargo invocation.
       - name: Add mingw64 to path for x86_64-gnu
         run: echo "C:\msys64\mingw64\bin" >> $GITHUB_PATH
-        if: matrix.rust == 'nightly-x86_64-gnu'
-        shell: bash
+        if: matrix.build == 'windows-x86_64-gnu'
 
       - name: Build release binaries
         run: cargo build --release --locked
 
       - name: Build archive
-        shell: bash
         run: |
-          staging="rustfmt_${{ matrix.build }}_${{ github.event.release.tag_name }}"
+          staging="rustfmt_${{ matrix.build }}_${{ env.RELEASE_TAG }}"
           mkdir -p "$staging"
 
           cp {README.md,Configurations.md,CHANGELOG.md,LICENSE-MIT,LICENSE-APACHE} "$staging/"
 
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+          if [ "$RUNNER_OS" = "Windows" ]; then
             cp target/release/{rustfmt.exe,cargo-fmt.exe,rustfmt-format-diff.exe,git-rustfmt.exe} "$staging/"
             7z a "$staging.zip" "$staging"
             echo "ASSET=$staging.zip" >> $GITHUB_ENV
@@ -67,7 +95,6 @@ jobs:
           fi
 
       - name: Upload Release Asset
-        if: github.event_name == 'release'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.event.release.tag_name }}" "${{ env.ASSET }}"
+        run: gh release upload "${{ env.RELEASE_TAG }}" "${{ env.ASSET }}" --clobber

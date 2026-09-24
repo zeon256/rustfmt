@@ -115,7 +115,7 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
         mk_sp(self.last_pos, hi)
     }
 
-    fn visit_stmt(&mut self, stmt: &Stmt<'_>, include_empty_semi: bool) {
+    fn visit_stmt(&mut self, stmt: &Stmt<'_>, include_empty_semi: bool, is_first_in_block: bool) {
         debug!("visit_stmt: {}", self.psess.span_to_debug_info(stmt.span()));
 
         // Preserve original source snippet if the statement isn't in the selected file lines.
@@ -169,6 +169,12 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
                         stmt.span(),
                         get_span_without_attrs(stmt.as_ast_node()),
                     );
+                } else if let Some(blank_lines) =
+                    self.exact_blank_lines_before_stmt(stmt, is_first_in_block)
+                {
+                    let shape = self.shape();
+                    let rewrite = self.with_context(|ctx| stmt.rewrite(ctx, shape));
+                    self.push_rewrite_with_blank_lines(stmt.span(), rewrite, blank_lines);
                 } else {
                     let shape = self.shape();
                     let rewrite = self.with_context(|ctx| stmt.rewrite(ctx, shape));
@@ -791,6 +797,71 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
         self.push_rewrite_inner(span, rewrite);
     }
 
+    /// Decides whether `stmt` is eligible for the exact
+    /// `blank_lines_before_control_flow_statements` spacing, returning the
+    /// configured count. Eligibility requires a standalone control-flow
+    /// statement that is not the first statement of its block, with the
+    /// surrounding option positive or explicitly set, and a source gap that
+    /// contains only whitespace and comments inside the selected file lines.
+    fn exact_blank_lines_before_stmt(
+        &self,
+        stmt: &Stmt<'_>,
+        is_first_in_block: bool,
+    ) -> Option<usize> {
+        if is_first_in_block || !stmt.is_control_flow() {
+            return None;
+        }
+        let blank_lines = self.config.blank_lines_before_control_flow_statements();
+        if blank_lines == 0
+            && !self
+                .config
+                .was_set()
+                .blank_lines_before_control_flow_statements()
+        {
+            return None;
+        }
+        let gap = mk_sp(self.last_pos, source!(self, stmt.span()).lo());
+        if gap.lo() > gap.hi() {
+            // Pathological span ordering; leave the ordinary path to surface
+            // its own diagnostic.
+            return None;
+        }
+        if out_of_file_lines_range!(self, gap) {
+            return None;
+        }
+        let gap_snippet = self.snippet(gap);
+        if CommentCodeSlices::new(gap_snippet)
+            .any(|(kind, _, subslice)| kind == CodeCharKind::Normal && !subslice.trim().is_empty())
+        {
+            // The gap contains code we could not format; fall back to the
+            // ordinary path.
+            return None;
+        }
+        Some(blank_lines)
+    }
+
+    /// Like `push_rewrite`, but the vertical whitespace at the boundary before
+    /// `span` is forced to exactly `blank_lines` empty lines.
+    fn push_rewrite_with_blank_lines(
+        &mut self,
+        span: Span,
+        rewrite: Option<String>,
+        blank_lines: usize,
+    ) {
+        let lo = source!(self, span).lo();
+        if lo == self.last_pos {
+            // Zero-length gap: `format_missing_inner` returns early before
+            // its vertical-whitespace handling, so force the exact run and
+            // the indentation here.
+            self.set_trailing_newlines(blank_lines);
+            self.push_str(&self.block_indent.to_string(self.config));
+            self.push_rewrite_inner(span, rewrite);
+            return;
+        }
+        self.format_missing_with_indent_and_blank_lines(lo, blank_lines);
+        self.push_rewrite_inner(span, rewrite);
+    }
+
     pub(crate) fn push_skipped_with_span(
         &mut self,
         attrs: &[ast::Attribute],
@@ -931,7 +1002,12 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
         self.visit_items_with_reordering(&ptr_vec_to_ref_vec(items));
     }
 
-    fn walk_stmts(&mut self, stmts: &[Stmt<'_>], include_current_empty_semi: bool) {
+    fn walk_stmts(
+        &mut self,
+        stmts: &[Stmt<'_>],
+        include_current_empty_semi: bool,
+        is_first_in_block: bool,
+    ) {
         if stmts.is_empty() {
             return;
         }
@@ -944,7 +1020,7 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
             .collect();
 
         if items.is_empty() {
-            self.visit_stmt(&stmts[0], include_current_empty_semi);
+            self.visit_stmt(&stmts[0], include_current_empty_semi, is_first_in_block);
 
             // FIXME(calebcartwright 2021-01-03) - This exists strictly to maintain legacy
             // formatting where rustfmt would preserve redundant semicolons on Items in a
@@ -967,15 +1043,15 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
                 false
             };
 
-            self.walk_stmts(&stmts[1..], include_next_empty);
+            self.walk_stmts(&stmts[1..], include_next_empty, false);
         } else {
             self.visit_items_with_reordering(&items);
-            self.walk_stmts(&stmts[items.len()..], false);
+            self.walk_stmts(&stmts[items.len()..], false, false);
         }
     }
 
     fn walk_block_stmts(&mut self, b: &ast::Block) {
-        self.walk_stmts(&Stmt::from_ast_nodes(b.stmts.iter()), false)
+        self.walk_stmts(&Stmt::from_ast_nodes(b.stmts.iter()), false, true)
     }
 
     fn format_mod(
