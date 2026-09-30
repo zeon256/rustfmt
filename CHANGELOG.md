@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [1.12.0](https://github.com/zeon256/rustfmt/compare/v1.11.0...v1.12.0) - 2026-09-30
+
+### Added
+
+- add blank_lines_after_control_flow
+- add blank lines for functions, structs, impl
+- add blank lines before control flow
+
+### Fixed
+
+- *(release)* disable semver_check for rustdoc v61 compatibility
+- *(release)* bump release-plz to 0.3.169 to avoid cargo package verify
+- *(release)* use git-only version detection in release-plz
+
 
 <!-- These changes will be available on the stable released channel alongside Rust 1.100 -->
 ## [1.11.0] 2026-11-12
