@@ -3,6 +3,11 @@
 # this fork is never published to crates.io, so registry-based version
 # detection reports the package as already released and skips the release PR.
 git_only = true
+# cargo-semver-checks bundled with release-plz 0.3.169 does not support the
+# rustdoc JSON format (v61) emitted by the nightly toolchain pinned in
+# rust-toolchain.toml. This fork only ships GitHub binaries and never publishes
+# to a registry, so skip the API-compatibility check.
+semver_check = false
 # Append release notes for the fork to the existing changelog.
 changelog_update = true
 changelog_path = "CHANGELOG.md"
