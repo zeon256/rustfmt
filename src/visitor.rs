@@ -118,7 +118,13 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
         mk_sp(self.last_pos, hi)
     }
 
-    fn visit_stmt(&mut self, stmt: &Stmt<'_>, include_empty_semi: bool, is_first_in_block: bool) {
+    fn visit_stmt(
+        &mut self,
+        stmt: &Stmt<'_>,
+        include_empty_semi: bool,
+        is_first_in_block: bool,
+        previous_is_control_flow: bool,
+    ) {
         debug!("visit_stmt: {}", self.psess.span_to_debug_info(stmt.span()));
 
         // Preserve original source snippet if the statement isn't in the selected file lines.
@@ -159,6 +165,16 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
             return;
         }
 
+        // Resolve the exact boundary override once for this statement; the
+        // first output-emitting call below consumes it. An unconsumed value
+        // (skipped successor, out-of-selected-lines successor, macro path)
+        // must not leak past this statement.
+        self.pending_exact_blank_lines = self.exact_blank_lines_before_stmt_boundary(
+            stmt,
+            is_first_in_block,
+            previous_is_control_flow,
+        );
+
         match stmt.as_ast_node().kind {
             ast::StmtKind::Item(ref item) => {
                 self.visit_item(item, is_first_in_block);
@@ -172,12 +188,6 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
                         stmt.span(),
                         get_span_without_attrs(stmt.as_ast_node()),
                     );
-                } else if let Some(blank_lines) =
-                    self.exact_blank_lines_before_stmt(stmt, is_first_in_block)
-                {
-                    let shape = self.shape();
-                    let rewrite = self.with_context(|ctx| stmt.rewrite(ctx, shape));
-                    self.push_rewrite_with_blank_lines(stmt.span(), rewrite, blank_lines);
                 } else {
                     let shape = self.shape();
                     let rewrite = self.with_context(|ctx| stmt.rewrite(ctx, shape));
@@ -198,6 +208,7 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
             }
             ast::StmtKind::Empty => (),
         }
+        self.pending_exact_blank_lines = None;
     }
 
     /// Remove spaces between the opening brace and the first statement or the inner attribute
@@ -456,7 +467,13 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
 
         // Pending exact blank-line override for the boundary before this item;
         // consumed by its first output-emitting call (attributes or the item).
-        self.pending_exact_blank_lines = self.exact_blank_lines_before_item(item, is_first_item);
+        // A control-flow statement just visited may have requested exact
+        // after-spacing at this boundary; keep the larger of the two
+        // independently requested counts.
+        self.pending_exact_blank_lines = self
+            .pending_exact_blank_lines
+            .take()
+            .max(self.exact_blank_lines_before_item(item, is_first_item));
 
         // This is where we bail out if there is a skip attribute. This is only
         // complex in the module case. It is complex because the module could be
@@ -841,30 +858,59 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
         self.push_rewrite_inner(span, rewrite);
     }
 
-    /// Decides whether `stmt` is eligible for the exact
-    /// `blank_lines_before_control_flow_statements` spacing, returning the
-    /// configured count. Eligibility requires a standalone control-flow
-    /// statement that is not the first statement of its block, with the
-    /// surrounding option positive or explicitly set, and a source gap that
-    /// contains only whitespace and comments inside the selected file lines.
-    fn exact_blank_lines_before_stmt(
+    /// Decides whether the sibling boundary before `stmt` qualifies for exact
+    /// spacing from `blank_lines_before_control_flow_statements` (before
+    /// contribution) or from the preceding control-flow statement via
+    /// `blank_lines_after_control_flow_statements` (after contribution).
+    /// Eligibility requires a standalone control-flow statement, before only
+    /// when it is not the first statement of its block, after only when the
+    /// previous sibling was a control-flow statement, with the surrounding
+    /// option positive or explicitly set, and a source gap that contains only
+    /// whitespace and comments inside the selected file lines.
+    fn exact_blank_lines_before_stmt_boundary(
         &self,
         stmt: &Stmt<'_>,
         is_first_in_block: bool,
+        previous_is_control_flow: bool,
     ) -> Option<usize> {
-        if is_first_in_block || !stmt.is_control_flow() {
+        let before = if is_first_in_block || !stmt.is_control_flow() {
+            None
+        } else {
+            self.enabled_count(
+                self.config.blank_lines_before_control_flow_statements(),
+                self.config
+                    .was_set()
+                    .blank_lines_before_control_flow_statements(),
+            )
+        };
+        let after = if previous_is_control_flow {
+            self.enabled_count(
+                self.config.blank_lines_after_control_flow_statements(),
+                self.config
+                    .was_set()
+                    .blank_lines_after_control_flow_statements(),
+            )
+        } else {
+            None
+        };
+        let blank_lines = before.max(after)?;
+        if out_of_file_lines_range!(self, stmt.span()) || stmt.is_empty() {
+            // The successor emits no formatted boundary for us to shape.
             return None;
         }
-        let blank_lines = self.config.blank_lines_before_control_flow_statements();
-        if blank_lines == 0
-            && !self
-                .config
-                .was_set()
-                .blank_lines_before_control_flow_statements()
-        {
+        let attrs = get_attrs_from_stmt(stmt.as_ast_node());
+        if contains_skip(attrs) {
+            // Skipped statements keep their source spacing.
             return None;
         }
-        let gap = mk_sp(self.last_pos, source!(self, stmt.span()).lo());
+        // Anchor the gap before the first outer attribute so the forced blank
+        // lines precede the successor's entire comment/attribute group.
+        let successor_span = if attrs.is_empty() {
+            stmt.span()
+        } else {
+            mk_sp(attrs[0].span.lo(), stmt.span().hi())
+        };
+        let gap = mk_sp(self.last_pos, source!(self, successor_span).lo());
         if gap.lo() > gap.hi() {
             // Pathological span ordering; leave the ordinary path to surface
             // its own diagnostic.
@@ -882,6 +928,17 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
             return None;
         }
         Some(blank_lines)
+    }
+
+    /// A configured exact count applies when it is positive or was explicitly
+    /// set (so an explicit `0` also applies). Returns `None` when disabled, so
+    /// combining with `Option::max` drops ineligible contributions.
+    fn enabled_count(&self, value: usize, was_set: bool) -> Option<usize> {
+        if value == 0 && !was_set {
+            None
+        } else {
+            Some(value)
+        }
     }
 
     /// Whether the item kind qualifies for `blank_lines_between_items`.
@@ -976,28 +1033,6 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
             return None;
         }
         Some(self.config.blank_lines_between_items())
-    }
-
-    /// Like `push_rewrite`, but the vertical whitespace at the boundary before
-    /// `span` is forced to exactly `blank_lines` empty lines.
-    fn push_rewrite_with_blank_lines(
-        &mut self,
-        span: Span,
-        rewrite: Option<String>,
-        blank_lines: usize,
-    ) {
-        let lo = source!(self, span).lo();
-        if lo == self.last_pos {
-            // Zero-length gap: `format_missing_inner` returns early before
-            // its vertical-whitespace handling, so force the exact run and
-            // the indentation here.
-            self.set_trailing_newlines(blank_lines.saturating_add(1));
-            self.push_str(&self.block_indent.to_string(self.config));
-            self.push_rewrite_inner(span, rewrite);
-            return;
-        }
-        self.format_missing_with_indent_and_blank_lines(lo, blank_lines);
-        self.push_rewrite_inner(span, rewrite);
     }
 
     pub(crate) fn push_skipped_with_span(
@@ -1148,6 +1183,7 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
         stmts: &[Stmt<'_>],
         include_current_empty_semi: bool,
         is_first_in_block: bool,
+        previous_is_control_flow: bool,
     ) {
         if stmts.is_empty() {
             return;
@@ -1161,7 +1197,12 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
             .collect();
 
         if items.is_empty() {
-            self.visit_stmt(&stmts[0], include_current_empty_semi, is_first_in_block);
+            self.visit_stmt(
+                &stmts[0],
+                include_current_empty_semi,
+                is_first_in_block,
+                previous_is_control_flow,
+            );
 
             // FIXME(calebcartwright 2021-01-03) - This exists strictly to maintain legacy
             // formatting where rustfmt would preserve redundant semicolons on Items in a
@@ -1184,15 +1225,43 @@ impl<'b, 'a: 'b> FmtVisitor<'a> {
                 false
             };
 
-            self.walk_stmts(&stmts[1..], include_next_empty, false);
+            // A statement only triggers exact after-spacing at the next
+            // boundary when it actually emits a formatted boundary: empty
+            // semicolons pass the incoming classification through, while
+            // skipped or unselected statements reset it.
+            let stmt = &stmts[0];
+            let next_previous_is_control_flow = if stmt.is_empty() {
+                previous_is_control_flow
+            } else if stmt.is_control_flow()
+                && !contains_skip(get_attrs_from_stmt(stmt.as_ast_node()))
+                && !out_of_file_lines_range!(self, stmt.span())
+            {
+                true
+            } else {
+                false
+            };
+            self.walk_stmts(
+                &stmts[1..],
+                include_next_empty,
+                false,
+                next_previous_is_control_flow,
+            );
         } else {
+            // The reordered group is one output block; apply the incoming
+            // control-flow-after boundary to the whole group, then reset.
+            self.pending_exact_blank_lines = self.exact_blank_lines_before_stmt_boundary(
+                &stmts[0],
+                is_first_in_block,
+                previous_is_control_flow,
+            );
             self.visit_items_with_reordering(&items, is_first_in_block);
-            self.walk_stmts(&stmts[items.len()..], false, false);
+            self.pending_exact_blank_lines = None;
+            self.walk_stmts(&stmts[items.len()..], false, false, false);
         }
     }
 
     fn walk_block_stmts(&mut self, b: &ast::Block) {
-        self.walk_stmts(&Stmt::from_ast_nodes(b.stmts.iter()), false, true)
+        self.walk_stmts(&Stmt::from_ast_nodes(b.stmts.iter()), false, true, false)
     }
 
     fn format_mod(

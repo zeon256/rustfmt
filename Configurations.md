@@ -128,6 +128,10 @@ When set, this exact number of blank lines is enforced before such statements, t
 immediately after an opening brace, before `else`, or around control-flow expressions used inside another
 statement (such as `let x = if ...`).
 
+When a boundary qualifies for both this option and
+[`blank_lines_after_control_flow_statements`](#blank_lines_after_control_flow_statements), the larger
+enabled count of the two is used.
+
 - **Default value**: `0`
 - **Possible values**: any non-negative integer
 - **Stable**: No (tracking issue: [#7120](https://github.com/rust-lang/rustfmt/issues/7120))
@@ -156,6 +160,50 @@ fn main() {
     for value in values {
         println!("{value}");
     }
+}
+```
+
+
+## `blank_lines_after_control_flow_statements`
+
+Number of blank lines to insert after standalone `if`, `match`, `loop`, `while`, and `for` statements.
+When set, this exact number of blank lines is enforced between such a statement and the sibling that
+follows it, taking precedence over [`blank_lines_lower_bound`](#blank_lines_lower_bound) and
+[`blank_lines_upper_bound`](#blank_lines_upper_bound) at those boundaries. The forced blank lines
+precede the successor's entire comment and attribute group. No blank lines are added before the
+closing brace of the block containing the statement, inside an `if`/`else` chain, or around
+control-flow expressions used inside another statement (such as `let x = if ...`). An explicitly set
+value of `0` removes existing blank lines at these boundaries, while the unset default of `0` leaves
+them untouched; when a boundary qualifies for both this option and
+[`blank_lines_before_control_flow_statements`](#blank_lines_before_control_flow_statements), the
+larger enabled count of the two is used.
+
+- **Default value**: `0`
+- **Possible values**: any non-negative integer
+- **Stable**: No
+
+### Example
+Original Code (rustfmt will not change it with the default value of `0`):
+
+```rust
+#![rustfmt::skip]
+
+fn main() {
+    loop {
+        work();
+    }
+    let done = true;
+}
+```
+
+#### `1`
+```rust
+fn main() {
+    loop {
+        work();
+    }
+
+    let done = true;
 }
 ```
 
