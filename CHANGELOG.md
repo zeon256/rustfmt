@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.12.1](https://github.com/zeon256/rustfmt/compare/v1.12.0...v1.12.1) - 2026-09-30
+
+### Other
+
+- Merge upstream rustfmt main
+
 ## [1.12.0](https://github.com/zeon256/rustfmt/compare/v1.11.0...v1.12.0) - 2026-09-30
 
 ### Added
