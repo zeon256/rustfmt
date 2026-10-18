@@ -1,0 +1,220 @@
+name: Upstream sync
+
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+    inputs:
+      retry:
+        description: Authorize a fresh attempt budget for the same fork/upstream pair
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  PYTHONPATH: ${{ github.workspace }}/trusted
+  PYTHONDONTWRITEBYTECODE: '1'
+  AI_MODEL: ${{ vars.AI_MODEL || 'glm-5.3' }}
+  AI_PROVIDER: ${{ vars.AI_PROVIDER || 'sync' }}
+  AI_API_STYLE: ${{ vars.AI_API_STYLE || 'openai-compatible' }}
+  AI_BASE_URL: ${{ vars.AI_BASE_URL }}
+
+jobs:
+  prepare:
+    if: github.repository == 'zeon256/rustfmt' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    outputs:
+      active: ${{ steps.plan.outputs.active }}
+      resolve: ${{ steps.plan.outputs.resolve }}
+      review: ${{ steps.plan.outputs.review }}
+      base: ${{ steps.plan.outputs.base }}
+      upstream: ${{ steps.plan.outputs.upstream }}
+      issue: ${{ steps.plan.outputs.issue }}
+    steps:
+      - name: Check out trusted workflow code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pin inputs and reserve this pair
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HAS_AI_API_KEY: ${{ secrets.AI_API_KEY != '' }}
+          RETRY: ${{ inputs.retry || false }}
+        run: |
+          args=()
+          if [[ "$RETRY" == true ]]; then args+=(--retry); fi
+          python3 -m ci.upstream_sync.control plan \
+            --source "$GITHUB_WORKSPACE/trusted" \
+            --repo "$RUNNER_TEMP/sync-repo" \
+            --patch "$RUNNER_TEMP/candidate/candidate.patch" "${args[@]}"
+      - name: Save clean-merge candidate
+        if: steps.plan.outputs.active == 'true' && steps.plan.outputs.resolve == 'false'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: upstream-sync-candidate
+          path: ${{ runner.temp }}/candidate/candidate.patch
+          if-no-files-found: error
+          retention-days: 7
+
+  resolve:
+    needs: prepare
+    if: needs.prepare.outputs.active == 'true' && needs.prepare.outputs.resolve == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: upstream-sync
+    permissions:
+      contents: read
+    env:
+      SYNC_BASE: ${{ needs.prepare.outputs.base }}
+      SYNC_UPSTREAM: ${{ needs.prepare.outputs.upstream }}
+    steps:
+      - name: Check out trusted resolver code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch pinned merge inputs without model credentials
+        run: |
+          python3 -m ci.upstream_sync.control checkout \
+            --source "$GITHUB_WORKSPACE/trusted" --repo "$RUNNER_TEMP/sync-repo" \
+            --base "$SYNC_BASE" --upstream "$SYNC_UPSTREAM"
+      - name: Resolve conflicts in the bounded OpenCode sandbox
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+        run: |
+          python3 -m ci.upstream_sync.agent \
+            --repo "$RUNNER_TEMP/sync-repo" --base "$SYNC_BASE" --upstream "$SYNC_UPSTREAM" \
+            --patch "$RUNNER_TEMP/candidate/candidate.patch"
+      - name: Save verified resolution candidate
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: upstream-sync-candidate
+          path: ${{ runner.temp }}/candidate/candidate.patch
+          if-no-files-found: error
+          retention-days: 7
+
+  validate:
+    needs: [prepare, resolve]
+    if: >-
+      always() && needs.prepare.result == 'success' && needs.prepare.outputs.active == 'true' &&
+      (needs.resolve.result == 'success' || needs.resolve.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    permissions:
+      contents: read
+    env:
+      SYNC_BASE: ${{ needs.prepare.outputs.base }}
+      SYNC_UPSTREAM: ${{ needs.prepare.outputs.upstream }}
+    steps:
+      - name: Check out trusted validation driver
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download only the candidate patch
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: upstream-sync-candidate
+          path: ${{ runner.temp }}/candidate
+      - name: Reconstruct and validate without secrets
+        run: |
+          python3 -m ci.upstream_sync.control validate \
+            --source "$GITHUB_WORKSPACE/trusted" --repo "$RUNNER_TEMP/validation-repo" \
+            --patch "$RUNNER_TEMP/candidate/candidate.patch" \
+            --base "$SYNC_BASE" --upstream "$SYNC_UPSTREAM"
+
+  publish:
+    needs: [prepare, resolve, validate]
+    if: always() && needs.prepare.outputs.active == 'true' && needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: ${{ needs.prepare.outputs.review == 'true' && 'upstream-sync-review' || 'upstream-sync' }}
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      pr_url: ${{ steps.publish.outputs.pr_url }}
+    env:
+      SYNC_BASE: ${{ needs.prepare.outputs.base }}
+      SYNC_UPSTREAM: ${{ needs.prepare.outputs.upstream }}
+      REQUIRES_REVIEW: ${{ needs.prepare.outputs.review }}
+    steps:
+      - name: Check out trusted publisher code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Recheck environment protection before minting credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -m ci.upstream_sync.control check-environment
+      - name: Download only the candidate patch
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: upstream-sync-candidate
+          path: ${{ runner.temp }}/candidate
+      - name: Mint a repository-scoped publisher token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          client-id: ${{ vars.SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - name: Reconstruct again and publish a draft PR with a branch lease
+        id: publish
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          python3 -m ci.upstream_sync.control publish \
+            --source "$GITHUB_WORKSPACE/trusted" --repo "$RUNNER_TEMP/publish-repo" \
+            --patch "$RUNNER_TEMP/candidate/candidate.patch" \
+            --base "$SYNC_BASE" --upstream "$SYNC_UPSTREAM"
+
+  report:
+    needs: [prepare, resolve, validate, publish]
+    if: always() && needs.prepare.outputs.issue != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Check out trusted reporting code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Record the result without model transcripts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYNC_BASE: ${{ needs.prepare.outputs.base }}
+          SYNC_UPSTREAM: ${{ needs.prepare.outputs.upstream }}
+          PAIR_ISSUE: ${{ needs.prepare.outputs.issue }}
+          JOB_RESULTS: ${{ toJSON(needs) }}
+          PR_URL: ${{ needs.publish.outputs.pr_url }}
+        run: |
+          python3 -m ci.upstream_sync.control report --base "$SYNC_BASE" --upstream "$SYNC_UPSTREAM"

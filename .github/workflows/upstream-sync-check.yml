@@ -1,0 +1,22 @@
+name: Upstream sync checks
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  automation-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      UPSTREAM_SYNC_CONTAINER_TESTS: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Exercise synchronization invariants with temporary Git repositories
+        run: python3 -B -m unittest discover -s ci/upstream_sync -t . -p 'test_*.py' -v
