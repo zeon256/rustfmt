@@ -173,6 +173,25 @@ file layout that upstream refactoring must retain.
   rustdoc format are compatible and that combination has been exercised. Do not
   infer compatibility merely from a toolchain or release-plz version bump.
 
+## F006 — Guarded upstream synchronization
+
+- **Origin:** the CI/CD change `oprlmvmt`, after the tracking baseline above.
+- **Required behavior:** integrate pinned upstream commits through a single
+  draft PR, preserving fork contracts and upstream ancestry. Resolve supported
+  conflicts with bounded OpenCode execution; never give the agent publishing
+  credentials, weaken preservation checks, or automatically merge the PR.
+- **Implementation touchpoints:** [the scheduled workflow](.github/workflows/upstream-sync.yml),
+  [Git verification](ci/upstream_sync/git_ops.py),
+  [OpenCode isolation](ci/upstream_sync/agent.py), and
+  [coordination and publishing](ci/upstream_sync/control.py).
+- **Existing validation:** [automation checks](.github/workflows/upstream-sync-check.yml)
+  exercise real temporary Git histories, durable retry state, publication races,
+  process limits, and Docker isolation. The candidate also passes secret-free
+  nightly validation before publication and the existing full PR CI afterward.
+- **Retirement:** retain while this repository needs independent fork maintenance.
+  Changes to credentials, isolation, review gates, or preservation policy require
+  human review.
+
 ## Preservation checks
 
 [The CI test workflow](.github/workflows/test.yml) runs
@@ -208,5 +227,153 @@ it; do not retain compatibility shims solely to preserve the old file layout.
 
 A clean textual merge is not proof that these contracts survived. Preserve
 upstream commit ancestry with merge commits rather than replaying this list or
-squashing upstream-sync history. No scheduled sync or AI conflict resolver is
-configured by this inventory.
+squashing upstream-sync history.
+
+## Operating upstream synchronization
+
+[Upstream sync](.github/workflows/upstream-sync.yml) runs daily at 04:23 UTC and
+supports a manual trigger. It runs only on `zeon256/rustfmt`'s `main` branch.
+GitHub schedules are not a freshness guarantee; check that the scheduled workflow
+remains enabled.
+
+### One-time GitHub setup
+
+Enable repository Issues: a bot-authored issue for each fork/upstream SHA pair is
+the durable execution ledger and failure report. Do not delete or repurpose these
+issues to reset an execution budget.
+
+Create these Actions repository variables:
+
+| Variable | Value |
+| --- | --- |
+| `AI_MODEL` | Optional; defaults to `glm-5.3` |
+| `AI_BASE_URL` | Required for conflicts: the provider's HTTPS API base URL, without credentials, query, or fragment |
+| `AI_API_STYLE` | Optional; defaults to `openai-compatible` |
+| `AI_PROVIDER` | Optional; defaults to `sync`, the internal OpenCode provider alias |
+| `SYNC_APP_CLIENT_ID` | Client ID of the GitHub App used to publish PRs |
+
+The API style selects a built-in runtime, not an arbitrary plugin. Supported
+values are `openai-compatible`, `openai-chat`, `openai-responses`, `anthropic`,
+`anthropic-compatible`, and `google`. Set the endpoint appropriate to the
+provider/account; no GLM vendor endpoint is hard-coded.
+
+Store `AI_API_KEY` as an Actions **repository secret**. Its value is passed only
+to the resolver step; preparation checks presence without passing the key to Git.
+A clean merge does not require a model key or endpoint.
+
+Install a GitHub App on this repository with **Contents: write**,
+**Pull requests: write**, and **Workflows: write** repository permissions.
+Workflows permission is needed to push approved upstream workflow changes; it
+does not grant the resolver a token. The publisher requests a short-lived token
+for this repository only and revokes it at job completion. An App token also lets
+the resulting PR trigger normal PR workflows without the approval requirement
+associated with PRs created using `GITHUB_TOKEN`.
+
+Configure two GitHub environments:
+
+| Environment | Deployment restriction | Approval |
+| --- | --- | --- |
+| `upstream-sync` | Selected branches/tags: exactly one **branch** rule named `main`; no tag rules | Required reviewers optional |
+| `upstream-sync-review` | The same exact `main` branch restriction | At least one required reviewer |
+
+Store the App's PEM private key as the `SYNC_APP_PRIVATE_KEY` **environment
+secret in both environments**, not as a repository secret. The branch restriction
+keeps a PR workflow from accessing it merely by naming the environment.
+Preparation and the publisher check the environment protection through the API;
+missing or broader protection fails closed. For a sole maintainer, allow
+self-review if necessary to explicitly approve manually triggered runs.
+
+Protect `main` with human PR approval and required checks, including the existing
+`test conclusion` gate and the new `automation-tests` check. Keep the project's
+other required PR checks enabled. Do not enable squash/rebase merging for sync PRs.
+Configure these settings before landing/enabling the scheduled workflow, then
+exercise its manual trigger first.
+
+### Execution and review
+
+Only one sync workflow runs at a time. Preparation freezes the current `main` and
+upstream `main` SHAs. An already-integrated upstream commit is a no-op; a
+no-content upstream commit still gets a merge that records its ancestry.
+
+Supported AI conflicts are same-mode regular UTF-8 file content and add/add
+conflicts. Binary/non-UTF-8, rename/delete/type conflicts, changed symlinks or
+submodules, unsafe paths, and resource-limit violations stop for manual handling.
+Changes to `FORK.md` or the three fork-specific source/target fixture directories
+also stop for manual integration, even if introduced upstream. Environment
+approval alone does not override that preservation rule.
+
+The agent uses OpenCode **2.0.28**, pinned by OCI digest, with a managed
+configuration checked by the actual binary before credentials are supplied.
+It runs as a non-root user in a read-only Docker container. Only eligible conflict
+files have writable mounts; context is tracked regular source, without `.git`,
+untracked files, or host symlinks. Shell, subagents, external file access, MCP,
+skills, repository plugin discovery, and other network tools are disabled.
+Only the configured model connection gets a credential. There is no host-execution
+fallback if Docker or its resource controls are unavailable.
+`HOME` points at the existing private `/state` tmpfs so OpenCode can start its
+service without requiring pre-created user directories.
+
+Only the verified candidate patch crosses jobs. Validation reconstructs the
+merge independently and runs the trusted base CI driver against the candidate
+in a separate container without model, GitHub-write, or release credentials.
+The publisher reconstructs and verifies the patch again without executing
+candidate code, confirms that `main` is still the pinned base, and updates only
+`automation/upstream-sync` using a branch lease.
+
+Changes under `.github/` or `ci/`, or to `release-plz.toml` or
+`rust-toolchain.toml`, require the protected `upstream-sync-review` environment
+approval **before the App credential is minted and the branch is published**.
+Review the linked artifact/diff and run before approving infrastructure changes:
+same-repository PR workflows can access repository-level credentials.
+
+The PR remains a draft. Review the diff and preservation results, require the full
+PR CI to pass, mark it ready, and merge it with a merge commit. Automation will not
+rewrite a PR that is already marked ready for human review. Do not add manual
+commits to the reserved automation branch; unexpected commits and branch races
+are rejected rather than overwritten.
+
+### Budgets and failed runs
+
+The resolver permits at most **two fresh resolution attempts** within a
+**20-minute total job timeout**, including setup. Attempts share one wall-clock
+budget and the same permissions. An invalid proposal may get one fresh attempt
+with its verification failure code; authentication/transport, sandbox, Git, and
+unsupported-conflict failures do not trigger a repair invocation.
+
+Before launching a resolver, the ledger reserves both attempt slots. Cancellation
+or a lost completion report conservatively retains the reservation, even if
+fewer model invocations actually ran. Scheduled runs do not retry the same
+reserved, failed, or published SHA pair. A changed fork/upstream pair gets a new
+budget. Use the manual **retry** input to explicitly re-arm an unchanged pair
+after investigating it.
+
+The bounds limit resolver invocations and elapsed time, not the provider's HTTP
+request count or a precise monetary amount. OpenCode can retry individual API
+requests internally; configure provider-side quotas for a hard spend limit.
+Nightly validation has its own bounded job and is not another agent attempt.
+
+Reports contain pinned SHAs, conflict/review paths, safe status codes, and run/PR
+links. Raw model transcripts and provider logs are neither printed nor uploaded.
+The candidate patch artifact is retained for seven days; the issue ledger
+persists. If a workflow is cancelled before reporting, inspect the run linked by
+the reserved issue before authorizing another budget.
+
+### Local verification
+
+Run the standard-library regression suite from the repository root:
+
+```sh
+python3 -B -m unittest discover -s ci/upstream_sync -t . -p 'test_*.py' -v
+```
+
+On a Linux Docker host, also exercise the pinned image's configuration and actual
+kernel-enforced filesystem/credential isolation:
+
+```sh
+UPSTREAM_SYNC_CONTAINER_TESTS=1 \
+  python3 -B -m unittest ci.upstream_sync.test_agent.ActualContainerInvariants -v
+```
+
+The automation-check workflow enables these container checks on GitHub-hosted
+Linux runners. They use no live model credential. Live GLM authentication and
+GitHub App publication still need an initial configured manual workflow run.
