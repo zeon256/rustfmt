@@ -284,8 +284,9 @@ def plan(api, source, repo, patch, *, retry):
         review = bool(merged["review_paths"])
         if review:
             check_environment(api, "upstream-sync-review", require_review=True)
-        if conflict and (os.environ.get("HAS_AI_API_KEY") != "true" or not os.environ.get("AI_BASE_URL")):
-            raise SyncError("configuration", "Conflicts need AI_API_KEY and AI_BASE_URL")
+        # The model key is environment-scoped and validated by the resolver.
+        if conflict and not os.environ.get("AI_BASE_URL"):
+            raise SyncError("configuration", "Conflicts need AI_BASE_URL")
         state["attempts_reserved"] = MAX_ATTEMPTS if conflict else 0
         if not conflict:
             patch.parent.mkdir(parents=True, exist_ok=True)

@@ -76,6 +76,7 @@ class ResolverInvariants(unittest.TestCase):
             {"AI_PROVIDER": "*"},
             {"AI_MODEL": "glm#unsafe-variant"},
             {"AI_API_KEY": "line\nbreak"},
+            {"AI_API_KEY": ""},
         ]
         for override in invalid:
             with self.subTest(override=override), patch.dict(os.environ, {**base, **override}, clear=True):

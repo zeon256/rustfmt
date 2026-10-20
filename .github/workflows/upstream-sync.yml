@@ -52,7 +52,6 @@ jobs:
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}
-          HAS_AI_API_KEY: ${{ secrets.AI_API_KEY != '' }}
           RETRY: ${{ inputs.retry || false }}
         run: |
           args=()
