@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- The unstable `required_version` configuration option now defaults to a caret (`^`) semver requirement instead of an exact match when no comparator is given, matching how Cargo treats dependency version requirements. Use the explicit `=` operator (e.g. `required_version = "=1.2.3"`) to opt back into exact matching [#6729](https://github.com/rust-lang/rustfmt/issues/6729)
+
 ## [1.12.1](https://github.com/zeon256/rustfmt/compare/v1.12.0...v1.12.1) - 2026-09-30
 
 ### Other
