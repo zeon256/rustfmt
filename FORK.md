@@ -257,8 +257,10 @@ values are `openai-compatible`, `openai-chat`, `openai-responses`, `anthropic`,
 `anthropic-compatible`, and `google`. Set the endpoint appropriate to the
 provider/account; no GLM vendor endpoint is hard-coded.
 
-Store `AI_API_KEY` as an Actions **repository secret**. Its value is passed only
-to the resolver step; preparation checks presence without passing the key to Git.
+Store `AI_API_KEY` as an Actions **environment secret in `upstream-sync`**.
+Only the resolver step receives it, after the job enters that environment.
+Preparation uses non-secret configuration only; the resolver validates the key
+before contacting the model. The key is not needed in `upstream-sync-review`.
 A clean merge does not require a model key or endpoint.
 
 Install a GitHub App on this repository with **Contents: write**,

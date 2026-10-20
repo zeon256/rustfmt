@@ -94,7 +94,7 @@ class PublisherTransitions(unittest.TestCase):
         self.race_commit = None
         self.addCleanup(patch.stopall)
         patch.dict(os.environ, {"GITHUB_REPOSITORY": "fork/repo", "GITHUB_SHA": self.base,
-                                "GITHUB_RUN_ID": "1", "HAS_AI_API_KEY": "false", "GITHUB_OUTPUT": ""}).start()
+                                "GITHUB_RUN_ID": "1", "GITHUB_OUTPUT": ""}).start()
         # Redirect only network transport aliases. Git, merge verification, commits,
         # branch leases, HTTP request handling and durable issue state are real.
         patch.object(control, "git", self.transport).start()
@@ -174,6 +174,26 @@ class PublisherTransitions(unittest.TestCase):
         self.assertEqual(raised.exception.code, "review_in_progress")
         self.assertEqual(self.branch_sha(), tip)
         self.assertFalse(self.server.prs[1]["draft"])
+
+    def test_conflict_preparation_does_not_need_the_environment_model_secret(self):
+        (self.source / "shared.rs").write_text("fn fork_variant() {}\n")
+        base = self.commit("fork content change")
+        REAL_GIT(self.source, "push", str(self.remote), "HEAD:refs/heads/main")
+        REAL_GIT(self.source, "checkout", "upstream")
+        (self.source / "shared.rs").write_text("fn upstream_variant() {}\n")
+        upstream = self.commit("upstream content change")
+        REAL_GIT(self.source, "checkout", "main")
+        self.server.upstream = upstream
+        candidate = self.root / "conflict.patch"
+        with patch.dict(os.environ, {"GITHUB_SHA": base, "AI_BASE_URL": "https://provider.example/v1"}, clear=True):
+            control.plan(self.api, self.source, self.root / "conflict-prepare", candidate, retry=False)
+        _, state = control.find_state(self.api, base, upstream)
+        self.assertEqual(state["status"], "reserved")
+        self.assertEqual(state["attempts_reserved"], 2)
+        self.assertEqual(state["paths"], ["shared.rs"])
+        self.assertIn("<<<<<<<", (self.root / "conflict-prepare" / "shared.rs").read_text())
+        self.assertFalse(candidate.exists())
+
 
 
 if __name__ == "__main__":
