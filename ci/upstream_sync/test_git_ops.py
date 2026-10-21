@@ -21,6 +21,19 @@ _FIXTURE_PATHS = tuple(
         "blank_lines_between_items",
     )
 )
+_FIXTURE_BODY = b"\r\nfn fixture() {\r\n    first();\r\n\r\n    second();\r\n}\r\n"
+_LEGACY_FIXTURES = {
+    path: (
+        f"// rustfmt-{Path(path).parent.name}: 0\r\n"
+        "// rustfmt-blank_lines_lower_bound: 1\r\n"
+    ).encode() + _FIXTURE_BODY
+    for path in _FIXTURE_PATHS
+}
+_MODERN_UPSTREAM = {
+    f"tests/{side}/configs/max_width/sample.rs":
+        "//@ rustfmt-max_width: 80\nfn upstream() {}\n"
+    for side in ("source", "target")
+}
 
 
 @dataclass(frozen=True)
@@ -337,6 +350,122 @@ class GitOpsTests(unittest.TestCase):
         prepare(repo, case.base, case.upstream)
         self.files(repo, {"shared.txt": "resolved\n", _FIXTURE_PATHS[0]: "forged fixture\n"})
         patch = self.unchecked_patch(repo, case.base, self.root / "fixture.patch")
+        self.failure("protected-path", materialize, self.clone(case), case.base, case.upstream, patch)
+
+    def test_directive_migration_round_trip_preserves_bodies_and_requires_review(self):
+        for conflict in (False, True):
+            with self.subTest(conflict=conflict):
+                upstream = {**_MODERN_UPSTREAM, "upstream.txt": "automatic\n"}
+                if conflict:
+                    upstream["shared.txt"] = "upstream\n"
+                case = self.case(
+                    fork={**_LEGACY_FIXTURES, "shared.txt": "fork\n"}, upstream=upstream,
+                )
+                repo = self.clone(case)
+                prepared = prepare(repo, case.base, case.upstream)
+                self.assertEqual(prepared["kind"], "conflict" if conflict else "clean")
+                self.assertEqual(prepared["conflicts"], ["shared.txt"] if conflict else [])
+                self.assertEqual(prepared["review_paths"], sorted(_FIXTURE_PATHS))
+                if conflict:
+                    (repo / "shared.txt").write_text("combined\n")
+                patch = self.root / "migrated.patch"
+                exported = write_patch(repo, case.base, case.upstream, patch)
+                candidate = self.clone(case)
+                result = materialize(candidate, case.base, case.upstream, patch)
+                self.assertEqual(result["tree"], exported["tree"])
+                for path in _FIXTURE_PATHS:
+                    expected = (
+                        f"//@ rustfmt-{Path(path).parent.name}: 0\r\n"
+                        "//@ rustfmt-blank_lines_lower_bound: 1\r\n"
+                    ).encode() + _FIXTURE_BODY
+                    self.assertEqual((candidate / path).read_bytes(), expected)
+                self.assertEqual((candidate / "FORK.md").read_text(), "fork policy\n")
+                self.assert_parents(candidate, case, result)
+
+    def test_directives_do_not_migrate_ahead_of_an_unambiguous_upstream_convention(self):
+        source = "tests/source/configs/max_width/sample.rs"
+        target = "tests/target/configs/max_width/sample.rs"
+        legacy = "// rustfmt-max_width: 80\nfn upstream() {}\n"
+        conventions = (
+            {},
+            {source: legacy, target: legacy},
+            {source: _MODERN_UPSTREAM[source]},
+            {source: _MODERN_UPSTREAM[source], target: legacy},
+            {**_MODERN_UPSTREAM, "tests/source/configs/max_width/legacy.rs": legacy},
+        )
+        for upstream in conventions:
+            with self.subTest(upstream=upstream):
+                case = self.case(
+                    fork=_LEGACY_FIXTURES,
+                    upstream={**upstream, "upstream.txt": "automatic\n"},
+                )
+                repo = self.clone(case)
+                prepare(repo, case.base, case.upstream)
+                patch = self.root / "unchanged-directives.patch"
+                write_patch(repo, case.base, case.upstream, patch)
+                candidate = self.clone(case)
+                materialize(candidate, case.base, case.upstream, patch)
+                for path, expected in _LEGACY_FIXTURES.items():
+                    self.assertEqual((candidate / path).read_bytes(), expected)
+                path = _FIXTURE_PATHS[0]
+                self.files(repo, {path: _LEGACY_FIXTURES[path].replace(b"// rustfmt-", b"//@ rustfmt-")})
+                self.failure("protected-path", write_patch, repo, case.base, case.upstream, patch)
+                self.unchecked_patch(repo, case.base, patch)
+                self.failure("protected-path", materialize, self.clone(case), case.base, case.upstream, patch)
+
+    def test_existing_modern_directives_and_body_comments_are_unchanged(self):
+        fixtures = {
+            path: (
+                f"//@ rustfmt-{Path(path).parent.name}: 0\n"
+                "fn fixture() {\n    // rustfmt-max_width: 80\n}\n"
+            ).encode()
+            for path in _FIXTURE_PATHS
+        }
+        case = self.case(fork=fixtures, upstream=_MODERN_UPSTREAM)
+        repo = self.clone(case)
+        self.assertEqual(prepare(repo, case.base, case.upstream)["review_paths"], [])
+        patch = self.root / "already-modern.patch"
+        write_patch(repo, case.base, case.upstream, patch)
+        candidate = self.clone(case)
+        materialize(candidate, case.base, case.upstream, patch)
+        for path, expected in fixtures.items():
+            self.assertEqual((candidate / path).read_bytes(), expected)
+
+    def test_migration_does_not_allow_fixture_forgery_at_export_or_materialization(self):
+        case = self.case(fork=_LEGACY_FIXTURES, upstream=_MODERN_UPSTREAM)
+        path = _FIXTURE_PATHS[0]
+        sentinel = self.root / "outside-fixture"
+        sentinel.write_text("untouched\n")
+        for mutation in ("body", "value", "revert", "delete", "mode", "symlink"):
+            with self.subTest(mutation=mutation):
+                repo = self.clone(case)
+                prepare(repo, case.base, case.upstream)
+                data = (repo / path).read_bytes()
+                if mutation == "body":
+                    self.files(repo, {path: data.replace(b"first();", b"changed();")})
+                elif mutation == "value":
+                    self.files(repo, {path: data.replace(b": 0", b": 2", 1)})
+                elif mutation == "revert":
+                    self.files(repo, {path: _LEGACY_FIXTURES[path]})
+                elif mutation == "delete":
+                    self.files(repo, {path: None})
+                elif mutation == "mode":
+                    (repo / path).chmod(0o755)
+                else:
+                    self.files(repo, {path: _Link(str(sentinel))})
+                patch = self.root / "forged-migration.patch"
+                self.failure("protected-path", write_patch, repo, case.base, case.upstream, patch)
+                self.unchecked_patch(repo, case.base, patch)
+                self.failure("protected-path", materialize, self.clone(case), case.base, case.upstream, patch)
+                self.assertEqual(sentinel.read_text(), "untouched\n")
+
+    def test_materialize_rejects_a_patch_omitting_required_directive_migration(self):
+        case = self.case(fork=_LEGACY_FIXTURES, upstream=_MODERN_UPSTREAM)
+        repo = self.clone(case)
+        prepare(repo, case.base, case.upstream)
+        patch = self.unchecked_patch(
+            repo, case.base, self.root / "missing-migration.patch", *_MODERN_UPSTREAM,
+        )
         self.failure("protected-path", materialize, self.clone(case), case.base, case.upstream, patch)
 
     def test_unrelated_histories_are_infrastructure_not_model_conflicts(self):

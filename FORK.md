@@ -205,6 +205,10 @@ CFG_RELEASE_CHANNEL=nightly RUSTFLAGS='-D warnings' \
   cargo run --locked --manifest-path ci/Cargo.toml build-and-test
 ```
 
+The macOS x86-64 test jobs use `macos-15-intel`, not `macos-latest`, so runner-label
+migrations cannot silently move them onto ARM64. When updating this image, retain
+an explicit Intel runner label for the `x86_64-apple-darwin` matrix target.
+
 [The formatter test runner](src/test/mod.rs) compares source fixtures with their
 expected target files in `system_tests` and checks target-file idempotence in
 `idempotence_tests`. [The contribution guide](Contributing.md#test-and-file-issues)
@@ -300,9 +304,18 @@ no-content upstream commit still gets a merge that records its ancestry.
 Supported AI conflicts are same-mode regular UTF-8 file content and add/add
 conflicts. Binary/non-UTF-8, rename/delete/type conflicts, changed symlinks or
 submodules, unsafe paths, and resource-limit violations stop for manual handling.
-Changes to `FORK.md` or the three fork-specific source/target fixture directories
-also stop for manual integration, even if introduced upstream. Environment
-approval alone does not override that preservation rule.
+Upstream changes to `FORK.md` or the three fork-specific source/target fixture
+directories stop for manual integration. Environment approval alone does not
+override that preservation rule.
+
+The sole automated fixture migration is inserting `@` into leading
+`// rustfmt-<option>: <value>` directives. It runs only when upstream's own source
+and target config fixtures consistently use `//@ rustfmt-...` with no legacy
+directives. The trusted Git layer performs this before resolution; the agent
+still cannot write these files. Export and reconstruction independently require
+the exact migrated bytes, preserving option values, formatting bodies, line
+endings, and file modes. Already-modern directives and body comments are not
+rewritten. Any other protected change still stops the sync.
 
 The agent uses OpenCode **2.0.28**, pinned by OCI digest, with a managed
 configuration checked by the actual binary before credentials are supplied.
@@ -322,9 +335,10 @@ The publisher reconstructs and verifies the patch again without executing
 candidate code, confirms that `main` is still the pinned base, and updates only
 `automation/upstream-sync` using a branch lease.
 
-Changes under `.github/` or `ci/`, or to `release-plz.toml` or
-`rust-toolchain.toml`, require the protected `upstream-sync-review` environment
-approval **before the App credential is minted and the branch is published**.
+Changes under `.github/` or `ci/`, to `release-plz.toml` or
+`rust-toolchain.toml`, and the canonical fixture-directive migration require the
+protected `upstream-sync-review` environment approval **before the App credential
+is minted and the branch is published**.
 Review the linked artifact/diff and run before approving infrastructure changes:
 same-repository PR workflows can access repository-level credentials.
 
@@ -348,6 +362,11 @@ fewer model invocations actually ran. Scheduled runs do not retry the same
 reserved, failed, or published SHA pair. A changed fork/upstream pair gets a new
 budget. Use the manual **retry** input to explicitly re-arm an unchanged pair
 after investigating it.
+
+After landing a pipeline fix, dispatch a new workflow run on the latest `main`.
+Re-running an old Actions run retains its original workflow commit and does not
+load the fix. A changed fork SHA creates a new ledger pair and budget; the
+**retry** input is only needed to re-arm an unchanged pair.
 
 The bounds limit resolver invocations and elapsed time, not the provider's HTTP
 request count or a precise monetary amount. OpenCode can retry individual API

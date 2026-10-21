@@ -34,6 +34,7 @@ _PROTECTED = ("FORK.md",) + tuple(
 )
 _REVIEW_FILES = {"release-plz.toml", "rust-toolchain.toml"}
 _MARKERS = re.compile(rb"^(?:<{7,}|={7,}|>{7,}|\|{7,})(?:[ \t].*)?\r?$", re.MULTILINE)
+_LEGACY_DIRECTIVE = re.compile(rb"// rustfmt-[A-Za-z_]+: \S+")
 
 
 def _path(raw: bytes, code: str = "manual-conflict-path") -> str:
@@ -226,7 +227,7 @@ def _preserve(before: dict, after: dict) -> None:
 def _review(paths) -> list[str]:
     return sorted(
         path for path in paths
-        if path.startswith((".github/", "ci/")) or path in _REVIEW_FILES
+        if _protected(path) or path.startswith((".github/", "ci/")) or path in _REVIEW_FILES
     )
 
 
@@ -252,6 +253,47 @@ def _text(git: _Git, entry: tuple, code: str) -> bytes:
     if b"\0" in data:
         raise SyncError(code, "Binary conflicts require manual integration.")
     return data
+
+
+def _migrate_fixture_directives(git: _Git, upstream: str, automatic: dict) -> None:
+    # Follow only an unambiguous convention in upstream's own fixtures. The old
+    # harness cannot read //@ directives, so do not migrate ahead of upstream.
+    for directory in ("tests/source/configs", "tests/target/configs"):
+        modern = git.run(
+            "grep", "-q", "-E", "^//@ rustfmt-[A-Za-z_]+: [^[:space:]]+\r?$",
+            upstream, "--", directory, allowed=(0, 1),
+        )
+        legacy = git.run(
+            "grep", "-q", "-E", r"^[[:space:]]*//[[:space:]]*rustfmt-[A-Za-z_]+[[:space:]]*:",
+            upstream, "--", directory, allowed=(0, 1),
+        )
+        if modern.returncode != 0 or legacy.returncode == 0:
+            return
+
+    for path, entry in automatic.items():
+        if not (_protected(path) and path.startswith("tests/") and path.endswith(".rs")):
+            continue
+        if entry[0] not in _REGULAR:
+            continue
+        original = _text(git, entry, "protected-path")
+        lines = original.splitlines(keepends=True)
+        for index, line in enumerate(lines):
+            content = line.removesuffix(b"\n").removesuffix(b"\r")
+            if content.strip() and not content.startswith(b"//"):
+                break
+            if _LEGACY_DIRECTIVE.fullmatch(content):
+                lines[index] = line[:2] + b"@" + line[2:]
+        migrated = b"".join(lines)
+        if migrated == original:
+            continue
+        workfile = git.worktree / path
+        if not stat.S_ISREG(workfile.lstat().st_mode):
+            raise SyncError("protected-path", "Fixture migration requires an ordinary file.")
+        workfile.write_bytes(migrated)
+        # Hash exact bytes, without repository-controlled filters or EOL changes.
+        oid = git.run("hash-object", "-w", "--stdin", data=migrated).stdout.decode("ascii").strip()
+        git.run("update-index", "--cacheinfo", f"{entry[0]},{oid},{path}")
+        automatic[path] = (entry[0], oid)
 
 
 @dataclass
@@ -310,6 +352,7 @@ def _automatic(git: _Git, base: str, upstream: str) -> _Merge:
             _, _, value = attributes[offset:offset + 3]
             if value in (b"unset", b"binary"):
                 raise SyncError("manual-conflict-type", "Binary merge attributes require manual integration.")
+    _migrate_fixture_directives(git, upstream, automatic)
     kind = "conflict" if conflicts else "clean"
     return _Merge(kind, original, automatic, conflicts)
 
@@ -320,7 +363,7 @@ def _candidate(git: _Git, merge: _Merge) -> tuple[str, dict]:
         raise SyncError("unresolved-conflicts", "Unmerged index entries remain.")
     tree = git.run("write-tree").stdout.decode("ascii").strip()
     candidate = _tree(git, tree, code="invalid-resolution")
-    _preserve(merge.original, candidate)
+    _preserve(merge.automatic, candidate)
     for path in merge.automatic.keys() | candidate.keys():
         if path not in merge.conflicts and candidate.get(path) != merge.automatic.get(path):
             raise SyncError("out-of-scope", "Candidate differs from the automatic merge outside original conflicts.")
@@ -407,7 +450,7 @@ def materialize(repo: Path, base: str, upstream: str, patch: Path) -> dict:
                 if len(fields) != 3:
                     raise SyncError("invalid-patch", "Unsupported patch path metadata.")
                 path = _path(fields[2], "invalid-patch")
-                if _protected(path):
+                if _protected(path) and path not in allowed:
                     raise SyncError("protected-path", "Patch touches fork preservation files.")
                 if path not in allowed:
                     raise SyncError("out-of-scope", "Patch touches a path outside the automatic merge and original conflicts.")
