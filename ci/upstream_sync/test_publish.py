@@ -1,7 +1,8 @@
-"""Exercise the publisher against real local Git remotes and an HTTP GitHub fixture."""
+"""Exercise synchronization with real local Git remotes, HTTP, and optional Docker."""
 
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import threading
 import unittest
@@ -193,6 +194,49 @@ class PublisherTransitions(unittest.TestCase):
         self.assertEqual(state["paths"], ["shared.rs"])
         self.assertIn("<<<<<<<", (self.root / "conflict-prepare" / "shared.rs").read_text())
         self.assertFalse(candidate.exists())
+
+    @unittest.skipUnless(os.environ.get("UPSTREAM_SYNC_CONTAINER_TESTS") == "1",
+                         "Set UPSTREAM_SYNC_CONTAINER_TESTS=1 on a Docker runner for real validation tests")
+    def test_validation_runs_executable_doctests_without_relaxing_mounts(self):
+        trusted_ci = Path(__file__).resolve().parents[1]
+        shutil.copytree(trusted_ci / "src", self.source / "ci" / "src")
+        for name in ("Cargo.toml", "Cargo.lock"):
+            shutil.copy2(trusted_ci / name, self.source / "ci" / name)
+        (self.source / "rust-toolchain.toml").write_text(
+            '[toolchain]\nchannel = "1.90.0"\nprofile = "minimal"\n'
+        )
+        for directory, name in ((".", "validation-root"), ("config_proc_macro", "validation-config"),
+                                ("check_diff", "validation-diff")):
+            crate = self.source / directory
+            (crate / "src").mkdir(parents=True)
+            (crate / "Cargo.toml").write_text(
+                f'[package]\nname = "{name}"\nversion = "0.1.0"\nedition = "2021"\n'
+            )
+            (crate / "Cargo.lock").write_text(
+                f'version = 4\n\n[[package]]\nname = "{name}"\nversion = "0.1.0"\n'
+            )
+            (crate / "src" / "lib.rs").write_text("")
+        (self.source / "config_proc_macro" / "src" / "lib.rs").write_text("""\
+//! ```
+//! let mounts = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
+//! let has_option = |path: &str, option: &str| mounts.lines().any(|line| {
+//!     let fields: Vec<_> = line.split_whitespace().collect();
+//!     fields[4] == path && fields[5].split(',').any(|value| value == option)
+//! });
+//! assert!(has_option("/", "ro"), "container root must remain read-only");
+//! assert!(has_option("/tmp", "noexec"), "/tmp must remain non-executable");
+//! std::fs::write(std::env::temp_dir().join("doctest-output"), b"executed").unwrap();
+//! std::fs::write("/work/doctest-proof", b"executed with hardened mounts").unwrap();
+//! ```
+""")
+        base = self.commit("executable doctest fixture")
+        prepared = self.root / "doctest-prepare"
+        control.checkout(self.source, prepared, base, self.upstream)
+        control.prepare(prepared, base, self.upstream)
+        control.write_patch(prepared, base, self.upstream, self.patch_file)
+        candidate = self.root / "validation"
+        control.validate(self.source, candidate, self.patch_file, base, self.upstream)
+        self.assertEqual((candidate / "doctest-proof").read_text(), "executed with hardened mounts")
 
 
 

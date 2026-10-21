@@ -313,6 +313,8 @@ def validate(source, repo, patch, base, upstream):
         directory = scratch / name
         directory.mkdir()
         mounts.extend(["--mount", f"type=bind,src={directory.resolve()},dst=/{name}"])
+    # rustdoc executes temporary binaries; /tmp remains a noexec tmpfs.
+    (scratch / "target" / "tmp").mkdir()
     command = [runtime, "run", "--rm", "--init", "--read-only", "--cap-drop=ALL",
                "--security-opt=no-new-privileges", "--pids-limit=512", "--memory=6g", "--cpus=2",
                "--user", f"{os.getuid()}:{os.getgid()}", "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m",
@@ -320,6 +322,7 @@ def validate(source, repo, patch, base, upstream):
                "--mount", f"type=bind,src={(source / 'ci').resolve()},dst=/trusted/ci,readonly",
                *mounts, "--workdir", "/work", "--env", "CARGO_HOME=/cargo", "--env", "RUSTUP_HOME=/rustup",
                "--env", "CARGO_TARGET_DIR=/target", "--env", "HOME=/tmp", "--env", "CFG_RELEASE_CHANNEL=nightly",
+               "--env", "TMPDIR=/target/tmp",
                "--env", "RUSTFLAGS=-D warnings", VALIDATION_IMAGE,
                "cargo", "run", "--locked", "--manifest-path", "/trusted/ci/Cargo.toml", "build-and-test"]
     try:

@@ -331,6 +331,9 @@ service without requiring pre-created user directories.
 Only the verified candidate patch crosses jobs. Validation reconstructs the
 merge independently and runs the trusted base CI driver against the candidate
 in a separate container without model, GitHub-write, or release credentials.
+Its root filesystem stays read-only and `/tmp` stays a `noexec` tmpfs.
+`TMPDIR=/target/tmp` routes compiler and doctest temporary files into writable
+build storage, allowing rustdoc to execute its test programs.
 The publisher reconstructs and verifies the patch again without executing
 candidate code, confirms that `main` is still the pinned base, and updates only
 `automation/upstream-sync` using a branch lease.
@@ -387,12 +390,12 @@ Run the standard-library regression suite from the repository root:
 python3 -B -m unittest discover -s ci/upstream_sync -t . -p 'test_*.py' -v
 ```
 
-On a Linux Docker host, also exercise the pinned image's configuration and actual
-kernel-enforced filesystem/credential isolation:
+On a Linux Docker host, also exercise the pinned resolver and validation images,
+executable doctests, and kernel-enforced filesystem/credential isolation:
 
 ```sh
 UPSTREAM_SYNC_CONTAINER_TESTS=1 \
-  python3 -B -m unittest ci.upstream_sync.test_agent.ActualContainerInvariants -v
+  python3 -B -m unittest discover -s ci/upstream_sync -t . -p 'test_*.py' -v
 ```
 
 The automation-check workflow enables these container checks on GitHub-hosted
