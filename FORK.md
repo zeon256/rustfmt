@@ -7,13 +7,16 @@ and the existing formatting fixtures record expected output.
 
 ## Tracking baseline
 
-| Item | Inventoried revision |
+| Item | Revision |
 | --- | --- |
 | Fork | `zeon256/rustfmt`, branch `main` |
-| Published fork tip | `1fff67c20d11171129d66da968efe91d6aba5526` (v1.12.1) |
+| Original inventory fork tip | `1fff67c20d11171129d66da968efe91d6aba5526` (v1.12.1) |
 | Upstream | `rust-lang/rustfmt`, branch `main` |
-| Upstream snapshot inspected | `58e7ab3f7b7eee99a344cf2bac3c44a433ce7ef4` |
-| Most recent common ancestor | `677b954590cc0d5e86cb97e7db4e4b5fb6290add` |
+| Original inventory upstream snapshot | `58e7ab3f7b7eee99a344cf2bac3c44a433ce7ef4` |
+| Original inventory common ancestor | `677b954590cc0d5e86cb97e7db4e4b5fb6290add` |
+| Latest integration fork base | `269f1c66dc025c5261ed0815a79b5ca78eebef02` |
+| Latest integrated upstream | `d6a8ce1782fca84e9f4732b3b289119a6e070ca7` |
+| Integration candidate | [Workflow run 39576980486](https://github.com/zeon256/rustfmt/actions/runs/39576980486) |
 
 The owner-specified patch range is inclusive:
 `687a2d46bf12e1dff4c05860f4b9d30dee724120` through
@@ -65,7 +68,7 @@ file layout that upstream refactoring must retain.
   `0.rs` checks explicit zero against the global lower bound; `1.rs` covers the
   five statement kinds, nesting, first-in-block behavior, embedded expressions,
   labels, comments, attributes, and skipping; `2.rs` checks a larger exact count.
-- **Upstream status / retirement:** fork-only at the inspected upstream snapshot.
+- **Upstream status / retirement:** fork-only at the latest integrated upstream revision.
   Retire the custom implementation only when upstream offers equivalent
   configuration and preserves these behaviors, demonstrated by the fixtures.
 
@@ -94,7 +97,7 @@ file layout that upstream refactoring must retain.
   checks an exact count above the global upper bound. These fixtures do not
   explicitly enable `reorder_impl_items`; preservation of that path also needs
   inspection or a targeted runtime check when it changes.
-- **Upstream status / retirement:** fork-only at the inspected upstream snapshot.
+- **Upstream status / retirement:** fork-only at the latest integrated upstream revision.
   Retire only when upstream provides equivalent configuration and passes the
   preservation checks, including any affected reordered-item path.
 
@@ -121,7 +124,7 @@ file layout that upstream refactoring must retain.
   nesting, comments, attributes, skipped statements, macros, and reordered uses.
   `overlap-before.rs`, `overlap-after.rs`, and `overlap-zero.rs` cover F001/F003
   precedence. `item-boundary.rs` covers F002/F003 interaction.
-- **Upstream status / retirement:** fork-only at the inspected upstream snapshot.
+- **Upstream status / retirement:** fork-only at the latest integrated upstream revision.
   Retire only when upstream provides equivalent configuration and preserves all
   of these boundary and precedence behaviors.
 
@@ -210,6 +213,12 @@ expected target files in `system_tests` and checks target-file idempotence in
 `idempotence_tests`. [The contribution guide](Contributing.md#test-and-file-issues)
 explains the fixture convention. Use the repository's other applicable CI checks
 as well; this inventory does not replace them.
+
+Fixture configuration comments use `//@ rustfmt-<option>: <value>` in both source
+and target files, following [upstream #7165](https://github.com/rust-lang/rustfmt/pull/7165).
+Migrate protected fixture directives together with the matching upstream harness
+in a reviewed manual integration. Leave formatting bodies and spacing expectations
+unchanged; directive syntax is test metadata, not a change to the fork contract.
 
 Do not delete or rewrite fork-specific expected outputs merely to make an
 upstream sync pass. If upstream intentionally changes behavior at one of these
@@ -360,6 +369,16 @@ The candidate patch artifact is retained for seven days; the issue ledger
 persists. If a workflow is cancelled before reporting, inspect the run linked by
 the reserved issue before authorizing another budget.
 
+If resolution succeeded but validation failed, reuse the saved candidate rather
+than forcing another model attempt. Independently reconstruct the unmodified
+patch against its pinned base and upstream with `git_ops.materialize` in an
+ordinary disposable clone; it resets that checkout, so never use the working
+repository. Retain the resulting two-parent merge on a separate bookmark and
+add reviewed compatibility fixes after it. Run the preservation checks again,
+then merge through normal PR review without weakening protected-fixture checks.
+The failed pair's ledger remains historical evidence; it does not need re-arming
+to publish a manual integration.
+
 ### Local verification
 
 Run the standard-library regression suite from the repository root:
@@ -377,5 +396,6 @@ UPSTREAM_SYNC_CONTAINER_TESTS=1 \
 ```
 
 The automation-check workflow enables these container checks on GitHub-hosted
-Linux runners. They use no live model credential. Live GLM authentication and
-GitHub App publication still need an initial configured manual workflow run.
+Linux runners. They use no live model credential and do not verify live provider
+authentication or GitHub App publication; exercise those through a configured
+workflow run.
