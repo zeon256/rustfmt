@@ -1,5 +1,8 @@
 """Exercise the publisher against real local Git remotes and an HTTP GitHub fixture."""
 
+import contextlib
+import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -140,6 +143,66 @@ class PublisherTransitions(unittest.TestCase):
         self.assertEqual(self.server.issues[1]["state"], "closed")
         self.assertEqual(self.branch_sha(), tip)
         self.assertFalse((self.root / "unused.patch").exists())
+
+    def test_unresolved_pair_requires_manual_retry_without_mutating_ledger(self):
+        for status, with_summary in (("reserved", True), ("failed", True), ("failed", False)):
+            with self.subTest(status=status, summary=with_summary):
+                issue, state = control.find_state(self.api, self.base, self.upstream)
+                control.update_state(self.api, issue, state, status=status, reason="Prior fixture result.")
+                before = json.dumps(self.server.issues, sort_keys=True).encode()
+                name = f"blocked-{status}-{with_summary}"
+                candidate = self.root / (name + ".patch")
+                summary = self.root / (name + ".md")
+                outputs = self.root / (name + ".outputs")
+                annotations = io.StringIO()
+                server = "https://github.example" if status == "failed" else "https://github.com"
+                issue_url = f"{server}/fork/repo/issues/{issue['number']}"
+                with patch.dict(os.environ, {"GITHUB_OUTPUT": str(outputs)}), contextlib.redirect_stdout(annotations):
+                    os.environ.pop("GITHUB_SERVER_URL", None)
+                    os.environ.pop("GITHUB_STEP_SUMMARY", None)
+                    if status == "failed":
+                        os.environ["GITHUB_SERVER_URL"] = server
+                    if with_summary:
+                        summary.write_text("# Existing summary\n")
+                        os.environ["GITHUB_STEP_SUMMARY"] = str(summary)
+                    with self.assertRaises(SyncError) as raised:
+                        control.plan(self.api, self.source, self.root / name, candidate, retry=False)
+                self.assertEqual(raised.exception.code, "retry_required")
+                self.assertEqual(json.dumps(self.server.issues, sort_keys=True).encode(), before)
+                self.assertEqual(self.server.prs, {})
+                self.assertEqual(REAL_GIT(self.remote, "for-each-ref", "--format=%(refname)",
+                                          "refs/heads/" + control.BRANCH), "")
+                self.assertFalse(candidate.exists())
+                emitted = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
+                self.assertEqual(emitted["active"], "false")
+                self.assertEqual(emitted["issue"], "")
+                self.assertIn("::error::", annotations.getvalue())
+                self.assertIn(status, annotations.getvalue())
+                self.assertIn(issue_url, annotations.getvalue())
+                if with_summary:
+                    contents = summary.read_text()
+                    self.assertTrue(contents.startswith("# Existing summary\n"))
+                    self.assertIn(issue_url, contents)
+                    self.assertIn(f"`{status}`", contents)
+                else:
+                    self.assertFalse(summary.exists())
+
+    def test_explicit_retry_rearms_a_failed_pair_once(self):
+        issue, state = control.find_state(self.api, self.base, self.upstream)
+        control.update_state(self.api, issue, state, status="failed", reason="Prior fixture failure.")
+        candidate = self.root / "retry.patch"
+        control.plan(self.api, self.source, self.root / "retry", candidate, retry=True)
+        rearmed, state = control.find_state(self.api, self.base, self.upstream)
+        self.assertEqual(len(self.server.issues), 1)
+        self.assertEqual(rearmed["number"], issue["number"])
+        self.assertEqual(rearmed["state"], "open")
+        self.assertEqual(state["status"], "reserved")
+        self.assertEqual(state["attempts_reserved"], 0)
+        reconstructed = self.root / "retry-reconstruction"
+        control.checkout(self.source, reconstructed, self.base, self.upstream)
+        result = control.materialize(reconstructed, self.base, self.upstream, candidate)
+        parents = REAL_GIT(reconstructed, "show", "--no-patch", "--format=%P", result["commit"]).split()
+        self.assertEqual(parents, [self.base, self.upstream])
 
     def test_main_advancing_invalidates_validation_before_any_push(self):
         (self.source / "new-main.rs").write_text("fn newer_main() {}\n")
