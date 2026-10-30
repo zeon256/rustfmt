@@ -331,6 +331,10 @@ service without requiring pre-created user directories.
 Only the verified candidate patch crosses jobs. Validation reconstructs the
 merge independently and runs the trusted base CI driver against the candidate
 in a separate container without model, GitHub-write, or release credentials.
+Compiler temporary files use the private, mode-`0700` `/target/tmp` directory on
+the existing build-storage mount; `/tmp` remains non-executable and `HOME=/tmp`.
+Build storage must support execution so the full nightly driver, including
+compiled rustdoc tests, can run without weakening the temporary-filesystem sandbox.
 The publisher reconstructs and verifies the patch again without executing
 candidate code, confirms that `main` is still the pinned base, and updates only
 `automation/upstream-sync` using a branch lease.
@@ -358,10 +362,13 @@ unsupported-conflict failures do not trigger a repair invocation.
 
 Before launching a resolver, the ledger reserves both attempt slots. Cancellation
 or a lost completion report conservatively retains the reservation, even if
-fewer model invocations actually ran. Scheduled runs do not retry the same
-reserved, failed, or published SHA pair. A changed fork/upstream pair gets a new
-budget. Use the manual **retry** input to explicitly re-arm an unchanged pair
-after investigating it.
+fewer model invocations actually ran. Scheduled runs do not retry the same SHA
+pair. An unresolved `reserved` or `failed` pair fails preparation with
+`retry_required` and links its existing issue in the step summary. Resolution,
+validation, publication, and reporting stay skipped; the original issue and
+budget are unchanged. A `published` pair remains a successful no-op. A changed
+fork/upstream pair gets a new budget. Use the manual **retry** input to explicitly
+re-arm an unchanged pair after investigating it.
 
 After landing a pipeline fix, dispatch a new workflow run on the latest `main`.
 Re-running an old Actions run retains its original workflow commit and does not
@@ -387,14 +394,19 @@ Run the standard-library regression suite from the repository root:
 python3 -B -m unittest discover -s ci/upstream_sync -t . -p 'test_*.py' -v
 ```
 
-On a Linux Docker host, also exercise the pinned image's configuration and actual
-kernel-enforced filesystem/credential isolation:
+On a Linux Docker host, also exercise both pinned images: OpenCode configuration
+and kernel-enforced filesystem/credential isolation, plus actual compiled rustdoc
+execution on build storage while `/tmp` remains non-executable:
 
 ```sh
 UPSTREAM_SYNC_CONTAINER_TESTS=1 \
-  python3 -B -m unittest ci.upstream_sync.test_agent.ActualContainerInvariants -v
+  python3 -B -m unittest discover -s ci/upstream_sync -t . -p 'test_*.py' -v
 ```
 
 The automation-check workflow enables these container checks on GitHub-hosted
-Linux runners. They use no live model credential. Live GLM authentication and
-GitHub App publication still need an initial configured manual workflow run.
+Linux runners. They use no live model credential. Explicitly enabled checks fail,
+rather than skip, when Docker or an image is unavailable. If Docker is unavailable
+locally, run the standard-library suite without the opt-in and require the hosted
+**Upstream sync checks** job to pass before merging. Live GLM authentication and
+GitHub App publication still need a fresh run on fixed `main`, with the existing
+protected review approval before publication.

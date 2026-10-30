@@ -272,8 +272,25 @@ def plan(api, source, repo, patch, *, retry):
         return
     issue, previous = find_state(api, base, upstream)
     if issue and not retry:
-        print("This exact fork/upstream pair already has a reservation or result; manual retry is required.")
-        return
+        if previous["status"] == "published":
+            print("This fork/upstream pair was already published; no action is required.")
+            return
+        server = os.environ.get("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
+        issue_url = f"{server}/{api.repository}/issues/{issue['number']}"
+        status = previous["status"]
+        print(f"::error::Upstream synchronization is blocked by an unresolved {status} pair: {issue_url}")
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary:
+            with open(summary, "a", encoding="utf-8") as output:
+                output.write(
+                    "\n## Upstream synchronization blocked\n\n"
+                    f"- Existing issue: [#{issue['number']}]({issue_url})\n"
+                    f"- State: `{status}`\n"
+                    "- No resolution, validation, or publication occurred.\n\n"
+                    "After a pipeline fix, dispatch a new workflow on latest `main`. "
+                    "Use `retry=true` only to authorize the same unchanged SHA pair.\n"
+                )
+        raise SyncError("retry_required", "The unresolved SHA pair requires an explicit manual retry")
     # Reserve before handing control to any job that can contact the model.
     conflict = merged["kind"] == "conflict"
     issue, state, _ = reserve(api, base, upstream, retry=retry, attempts=0)
@@ -300,28 +317,34 @@ def plan(api, source, repo, patch, *, retry):
         raise
 
 
-def validate(source, repo, patch, base, upstream):
-    checkout(source, repo, base, upstream)
-    candidate = materialize(repo, base, upstream, patch)
+def _validation_container_command(source, repo, scratch):
     runtime = shutil.which("docker")
     if not runtime:
         raise SyncError("sandbox_unavailable", "Validation requires Docker; there is no host fallback")
-    scratch = repo.parent / "validation-storage"
     scratch.mkdir()
     mounts = []
     for name in ("cargo", "rustup", "target"):
         directory = scratch / name
         directory.mkdir()
         mounts.extend(["--mount", f"type=bind,src={directory.resolve()},dst=/{name}"])
-    command = [runtime, "run", "--rm", "--init", "--read-only", "--cap-drop=ALL",
+    (scratch / "target" / "tmp").mkdir(mode=0o700)
+    return [runtime, "run", "--rm", "--init", "--read-only", "--cap-drop=ALL",
                "--security-opt=no-new-privileges", "--pids-limit=512", "--memory=6g", "--cpus=2",
-               "--user", f"{os.getuid()}:{os.getgid()}", "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m",
+               "--user", f"{os.getuid()}:{os.getgid()}", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=512m",
                "--mount", f"type=bind,src={repo.resolve()},dst=/work",
                "--mount", f"type=bind,src={(source / 'ci').resolve()},dst=/trusted/ci,readonly",
                *mounts, "--workdir", "/work", "--env", "CARGO_HOME=/cargo", "--env", "RUSTUP_HOME=/rustup",
-               "--env", "CARGO_TARGET_DIR=/target", "--env", "HOME=/tmp", "--env", "CFG_RELEASE_CHANNEL=nightly",
-               "--env", "RUSTFLAGS=-D warnings", VALIDATION_IMAGE,
-               "cargo", "run", "--locked", "--manifest-path", "/trusted/ci/Cargo.toml", "build-and-test"]
+               "--env", "CARGO_TARGET_DIR=/target", "--env", "TMPDIR=/target/tmp",
+               "--env", "HOME=/tmp", "--env", "CFG_RELEASE_CHANNEL=nightly",
+               "--env", "RUSTFLAGS=-D warnings", VALIDATION_IMAGE]
+
+
+def validate(source, repo, patch, base, upstream):
+    checkout(source, repo, base, upstream)
+    candidate = materialize(repo, base, upstream, patch)
+    scratch = repo.parent / "validation-storage"
+    command = _validation_container_command(source, repo, scratch)
+    command += ["cargo", "run", "--locked", "--manifest-path", "/trusted/ci/Cargo.toml", "build-and-test"]
     try:
         result = subprocess.run(command, timeout=5400)
     except (OSError, subprocess.TimeoutExpired):
