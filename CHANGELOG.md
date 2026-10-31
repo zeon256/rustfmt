@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [1.12.2](https://github.com/zeon256/rustfmt/compare/v1.12.1...v1.12.2) - 2026-10-31
+
+### Fixed
+
+- *(ci)* repair upstream sync validation and retry reporting
+- *(ci)* normalize fork fixture directives during upstream sync
+- *(ci)* validate model keys in the resolver environment
+
+### Other
+
+- Merge rust-lang/rustfmt main
+- automate upstream synchronization
+- inventory fork preservation contracts
+
 ### Changed
 - The unstable `required_version` configuration option now defaults to a caret (`^`) semver requirement instead of an exact match when no comparator is given, matching how Cargo treats dependency version requirements. Use the explicit `=` operator (e.g. `required_version = "=1.2.3"`) to opt back into exact matching [#6729](https://github.com/rust-lang/rustfmt/issues/6729)
 
