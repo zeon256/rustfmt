@@ -24,6 +24,7 @@ COMMIT_MARKER = "Upstream-Sync: v1"
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 MAX_ATTEMPTS = 2
 VALIDATION_IMAGE = "rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f"
+WORKFLOW_IMAGE = "rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667"
 
 
 class GitHub:
@@ -317,6 +318,33 @@ def plan(api, source, repo, patch, *, retry):
         raise
 
 
+def _validate_workflows(repo, paths):
+    workflows = sorted(
+        path for path in paths
+        if path.startswith(".github/workflows/") and Path(path).suffix in {".yml", ".yaml"}
+        and (repo / path).is_file()
+    )
+    if not workflows:
+        return
+    runtime = shutil.which("docker")
+    if not runtime:
+        raise SyncError("sandbox_unavailable", "Workflow validation requires Docker; there is no host fallback")
+    command = [
+        runtime, "run", "--rm", "--network=none", "--read-only", "--cap-drop=ALL",
+        "--security-opt=no-new-privileges", "--pids-limit=128", "--memory=512m", "--cpus=1",
+        "--user", f"{os.getuid()}:{os.getgid()}", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m",
+        "--mount", f"type=bind,src={repo.resolve()},dst=/work,readonly",
+        "--workdir", "/work", "--env", "HOME=/tmp", WORKFLOW_IMAGE,
+        "-shellcheck=", "-pyflakes=", "-config-file=/dev/null", *workflows,
+    ]
+    try:
+        result = subprocess.run(command, timeout=180)
+    except (OSError, subprocess.TimeoutExpired):
+        raise SyncError("workflow_validation_runtime", "Workflow validation container could not complete") from None
+    if result.returncode:
+        raise SyncError("workflow_invalid", "Candidate GitHub Actions workflows did not pass validation")
+
+
 def _validation_container_command(source, repo, scratch):
     runtime = shutil.which("docker")
     if not runtime:
@@ -342,6 +370,7 @@ def _validation_container_command(source, repo, scratch):
 def validate(source, repo, patch, base, upstream):
     checkout(source, repo, base, upstream)
     candidate = materialize(repo, base, upstream, patch)
+    _validate_workflows(repo, candidate["review_paths"])
     scratch = repo.parent / "validation-storage"
     command = _validation_container_command(source, repo, scratch)
     command += ["cargo", "run", "--locked", "--manifest-path", "/trusted/ci/Cargo.toml", "build-and-test"]
