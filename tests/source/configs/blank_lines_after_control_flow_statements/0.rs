@@ -1,5 +1,5 @@
-// rustfmt-blank_lines_after_control_flow_statements: 0
-// rustfmt-blank_lines_lower_bound: 1
+//@ rustfmt-blank_lines_after_control_flow_statements: 0
+//@ rustfmt-blank_lines_lower_bound: 1
 fn sample(n: u32) {
     let m = n;
     if m > 0 {

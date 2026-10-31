@@ -1,5 +1,5 @@
-// rustfmt-blank_lines_between_items: 0
-// rustfmt-blank_lines_lower_bound: 1
+//@ rustfmt-blank_lines_between_items: 0
+//@ rustfmt-blank_lines_lower_bound: 1
 fn one() {}
 fn two() {}
 struct Point {

@@ -1,5 +1,5 @@
-// rustfmt-blank_lines_between_items: 2
-// rustfmt-blank_lines_upper_bound: 1
+//@ rustfmt-blank_lines_between_items: 2
+//@ rustfmt-blank_lines_upper_bound: 1
 fn one() {}
 
 

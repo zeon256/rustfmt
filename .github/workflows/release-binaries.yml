@@ -27,6 +27,8 @@ defaults:
   run:
     shell: bash
 
+permissions: {}
+
 jobs:
   build-release:
     name: ${{ matrix.build }}
@@ -56,7 +58,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ env.RELEASE_TAG }}
           persist-credentials: false
@@ -65,7 +67,10 @@ jobs:
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs > rustup-init.sh
           sh rustup-init.sh -y --default-toolchain none
+          rustup target add ${MATRIX_TARGET}
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+        env:
+          MATRIX_TARGET: ${{ matrix.target }}
 
       # The crate links rustc_private internals, so the build must run with the
       # toolchain pinned in rust-toolchain.toml (nightly + llvm-tools + rustc-dev).
@@ -93,6 +98,10 @@ jobs:
             tar czf "$staging.tar.gz" "$staging"
             echo "ASSET=$staging.tar.gz" >> $GITHUB_ENV
           fi
+        env:
+          MATRIX_OS: ${{ matrix.os }}
+          MATRIX_BUILD: ${{ matrix.build }}
+          GITHUB_EVENT_RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
 
       - name: Upload Release Asset
         env:
