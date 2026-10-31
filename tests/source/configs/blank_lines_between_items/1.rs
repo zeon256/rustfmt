@@ -1,4 +1,4 @@
-// rustfmt-blank_lines_between_items: 1
+//@ rustfmt-blank_lines_between_items: 1
 fn one() {}
 
 fn two() {}

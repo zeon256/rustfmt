@@ -1,4 +1,4 @@
-// rustfmt-blank_lines_before_control_flow_statements: 1
+//@ rustfmt-blank_lines_before_control_flow_statements: 1
 fn five_kinds(n: u32) {
     let m = n + 1;
     if m > 0 {
