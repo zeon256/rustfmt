@@ -27,8 +27,6 @@ defaults:
   run:
     shell: bash
 
-permissions: {}
-
 jobs:
   build-release:
     name: ${{ matrix.build }}

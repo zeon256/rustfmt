@@ -329,8 +329,16 @@ fallback if Docker or its resource controls are unavailable.
 service without requiring pre-created user directories.
 
 Only the verified candidate patch crosses jobs. Validation reconstructs the
-merge independently and runs the trusted base CI driver against the candidate
-in a separate container without model, GitHub-write, or release credentials.
+merge independently, then checks added or modified GitHub Actions workflows with
+actionlint **1.7.12**, pinned by OCI digest. This separate container has no network,
+runs non-root, and mounts the candidate read-only. Candidate lint configuration
+cannot suppress errors; shellcheck and pyflakes integrations are disabled, and
+workflow scripts are not executed. Invalid workflow syntax or expressions stop
+validation with `workflow_invalid` before the Rust build. Unchanged and deleted
+workflows are not linted.
+
+The trusted base CI driver then runs against the candidate in a separate
+container without model, GitHub-write, or release credentials.
 Compiler temporary files use the private, mode-`0700` `/target/tmp` directory on
 the existing build-storage mount; `/tmp` remains non-executable and `HOME=/tmp`.
 Build storage must support execution so the full nightly driver, including
@@ -394,9 +402,10 @@ Run the standard-library regression suite from the repository root:
 python3 -B -m unittest discover -s ci/upstream_sync -t . -p 'test_*.py' -v
 ```
 
-On a Linux Docker host, also exercise both pinned images: OpenCode configuration
-and kernel-enforced filesystem/credential isolation, plus actual compiled rustdoc
-execution on build storage while `/tmp` remains non-executable:
+On a Linux Docker host, also exercise the pinned images: OpenCode configuration
+and kernel-enforced filesystem/credential isolation, workflow validation before
+the Rust build, and actual compiled rustdoc execution on build storage while
+`/tmp` remains non-executable:
 
 ```sh
 UPSTREAM_SYNC_CONTAINER_TESTS=1 \
