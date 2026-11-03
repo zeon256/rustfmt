@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.12.3](https://github.com/zeon256/rustfmt/compare/v1.12.2...v1.12.3) - 2026-11-03
+
+### Other
+
+- Merge rust-lang/rustfmt main
+- Revert "Fixes adjustment of max_width within macros"
+- Revert "Use saturating arithmetics for `adjust_max_width`"
+
 ## [1.12.2](https://github.com/zeon256/rustfmt/compare/v1.12.1...v1.12.2) - 2026-10-31
 
 ### Fixed
