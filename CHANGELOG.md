@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [1.12.4](https://github.com/zeon256/rustfmt/compare/v1.12.3...v1.12.4) - 2026-11-08
+
+### Other
+
+- Merge rust-lang/rustfmt main
+- describe PR lifecycle in contributing docs
+- add a TOC to contributing docs
+- add fuzzing guidelines to contributing docs
+- move linting section slightly below
+- add TL;DR LLM usage policy to contributing docs
+- Remove each comment's leading whitespace in `comment::rewrite_comment`
+- Derive Debug for `comment::CommentStyle`
+- Add style edition 2021 regression test
+- Add additional test case which errored with trailing whitespace
+- Add pre-fix tests for rust-lang/rustfmt#6612
+
 ## [1.12.3](https://github.com/zeon256/rustfmt/compare/v1.12.2...v1.12.3) - 2026-11-03
 
 ### Other
