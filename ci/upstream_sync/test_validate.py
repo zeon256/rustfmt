@@ -80,6 +80,20 @@ class ActualWorkflowContainerInvariants(unittest.TestCase):
         ])
         self.assertFalse((self.repo / "workflow-executed").exists())
 
+    def test_self_repository_references_are_accepted(self):
+        (self.workflows / "caller.yml").write_text(
+            "on: workflow_dispatch\n"
+            "permissions: {}\n"
+            "jobs:\n"
+            "  call:\n"
+            "    uses: $/.github/workflows/common.yml\n"
+            "  smoke:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: $/.github/actions/setup\n"
+        )
+        control._validate_workflows(self.repo, [".github/workflows/caller.yml"])
+
 
 @unittest.skipUnless(os.environ.get("UPSTREAM_SYNC_CONTAINER_TESTS") == "1",
                      "Set UPSTREAM_SYNC_CONTAINER_TESTS=1 on a Docker runner for real OCI validation tests")

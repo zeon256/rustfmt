@@ -335,7 +335,9 @@ def _validate_workflows(repo, paths):
         "--user", f"{os.getuid()}:{os.getgid()}", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m",
         "--mount", f"type=bind,src={repo.resolve()},dst=/work,readonly",
         "--workdir", "/work", "--env", "HOME=/tmp", WORKFLOW_IMAGE,
-        "-shellcheck=", "-pyflakes=", "-config-file=/dev/null", *workflows,
+        "-shellcheck=", "-pyflakes=", "-config-file=/dev/null",
+        # actionlint 1.7.12 predates GitHub's `$/` self-repository `uses:` syntax (rhysd/actionlint#711).
+        "-ignore", r'^reusable workflow call "\$/', "-ignore", r'^specifying action "\$/', *workflows,
     ]
     try:
         result = subprocess.run(command, timeout=180)
