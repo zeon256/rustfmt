@@ -333,9 +333,11 @@ merge independently, then checks added or modified GitHub Actions workflows with
 actionlint **1.7.12**, pinned by OCI digest. This separate container has no network,
 runs non-root, and mounts the candidate read-only. Candidate lint configuration
 cannot suppress errors; shellcheck and pyflakes integrations are disabled, and
-workflow scripts are not executed. Invalid workflow syntax or expressions stop
-validation with `workflow_invalid` before the Rust build. Unchanged and deleted
-workflows are not linted.
+workflow scripts are not executed. actionlint 1.7.12 predates GitHub's `$/`
+self-repository `uses:` syntax, so only its format errors for `$/` references are
+ignored; those calls are not checked against the referenced workflow or action.
+Invalid workflow syntax or expressions stop validation with `workflow_invalid`
+before the Rust build. Unchanged and deleted workflows are not linted.
 
 The trusted base CI driver then runs against the candidate in a separate
 container without model, GitHub-write, or release credentials.
