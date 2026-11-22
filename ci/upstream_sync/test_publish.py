@@ -42,7 +42,8 @@ class RepositoryHandler(LedgerHandler):
         elif path == "pulls" and self.command == "POST":
             import json
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            pr = dict(payload, number=1, html_url="https://github.com/fork/repo/pull/1")
+            pr = dict(payload, number=1, node_id="PR_node_1", auto_merge=None,
+                      html_url="https://github.com/fork/repo/pull/1")
             self.server.prs[1] = pr
             self.respond(201, pr)
         elif path.startswith("pulls/") and self.command == "PATCH":
@@ -51,6 +52,25 @@ class RepositoryHandler(LedgerHandler):
             pr = self.server.prs[int(path.split("/")[-1])]
             pr.update(payload)
             self.respond(200, pr)
+        elif self.path == "/graphql":
+            import json
+            import re
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            name = re.search(r"\{ (\w+)\(input", request["query"]).group(1)
+            pr = self.server.prs[1]
+            self.server.events.append(name)
+            rejected = request["variables"]["id"] != pr["node_id"] or (
+                name == "enablePullRequestAutoMerge" and (pr["draft"] or self.server.reject_auto_merge))
+            if rejected:
+                self.respond(200, {"errors": [{"message": "provider-secret-do-not-log"}]})
+                return
+            if name == "enablePullRequestAutoMerge":
+                pr["auto_merge"] = {"merge_method": "merge", "expected_head": request["variables"]["head"]}
+            elif name == "disablePullRequestAutoMerge":
+                pr["auto_merge"] = None
+            else:
+                pr["draft"] = name == "convertPullRequestToDraft"
+            self.respond(200, {"data": {name: {"clientMutationId": None}}})
         else:
             super().dispatch()
 
@@ -85,6 +105,8 @@ class PublisherTransitions(unittest.TestCase):
         self.server.prs = {}
         self.server.issues = {}
         self.server.reject = False
+        self.server.reject_auto_merge = False
+        self.server.events = []
         self.server.environment = {
             "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True},
             "protection_rules": [],
@@ -119,13 +141,16 @@ class PublisherTransitions(unittest.TestCase):
             "https://github.com/rust-lang/rustfmt.git": str(self.source),
             "https://github.com/fork/repo.git": str(self.remote),
         }
+        if arguments[0] == "push":
+            self.server.events.append("push")
         if arguments[0] == "push" and self.race_commit:
             REAL_GIT(self.remote, "update-ref", "refs/heads/" + control.BRANCH, self.race_commit)
             self.race_commit = None
         return REAL_GIT(repo, *(aliases.get(argument, argument) for argument in arguments), auth=auth)
 
-    def publish(self, name="publish"):
-        control.publish(self.api, self.source, self.root / name, self.patch_file, self.base, self.upstream)
+    def publish(self, name="publish", *, auto_merge=False):
+        control.publish(self.api, self.source, self.root / name, self.patch_file, self.base, self.upstream,
+                        auto_merge=auto_merge)
 
     def branch_sha(self):
         return REAL_GIT(self.remote, "rev-parse", "refs/heads/" + control.BRANCH)
@@ -237,6 +262,41 @@ class PublisherTransitions(unittest.TestCase):
         self.assertEqual(raised.exception.code, "review_in_progress")
         self.assertEqual(self.branch_sha(), tip)
         self.assertFalse(self.server.prs[1]["draft"])
+
+    def test_unreviewed_sync_auto_merges_exactly_the_published_commit(self):
+        self.publish(auto_merge=True)
+        pr = self.server.prs[1]
+        self.assertFalse(pr["draft"])
+        self.assertEqual(pr["auto_merge"], {"merge_method": "merge", "expected_head": self.branch_sha()})
+
+    def test_auto_merge_pr_is_withdrawn_before_a_review_gated_push(self):
+        self.publish(auto_merge=True)
+        self.server.events.clear()
+        self.publish("review-gated")
+        self.assertEqual(self.server.events,
+                         ["disablePullRequestAutoMerge", "convertPullRequestToDraft", "push"])
+        self.assertTrue(self.server.prs[1]["draft"])
+        self.assertIsNone(self.server.prs[1]["auto_merge"])
+
+    def test_auto_merge_pr_is_rearmed_for_the_new_commit(self):
+        self.publish(auto_merge=True)
+        self.server.events.clear()
+        self.publish("republish", auto_merge=True)
+        self.assertEqual(self.server.events, [
+            "disablePullRequestAutoMerge", "convertPullRequestToDraft", "push",
+            "markPullRequestReadyForReview", "enablePullRequestAutoMerge",
+        ])
+        self.assertEqual(self.server.prs[1]["auto_merge"]["expected_head"], self.branch_sha())
+
+    def test_failed_auto_merge_leaves_an_automation_owned_draft(self):
+        self.server.reject_auto_merge = True
+        with self.assertRaises(SyncError) as raised:
+            self.publish(auto_merge=True)
+        self.assertEqual(raised.exception.code, "github_api")
+        self.assertTrue(self.server.prs[1]["draft"])
+        self.assertIsNone(self.server.prs[1]["auto_merge"])
+        self.publish("retry-without-auto-merge")
+        self.assertTrue(self.server.prs[1]["draft"])
 
     def test_conflict_preparation_does_not_need_the_environment_model_secret(self):
         (self.source / "shared.rs").write_text("fn fork_variant() {}\n")

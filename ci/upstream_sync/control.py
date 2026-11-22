@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import contextlib
 import html
 import json
 import os
@@ -91,6 +92,23 @@ class GitHub:
         if prs and PR_MARKER not in (prs[0].get("body") or ""):
             raise SyncError("branch_ownership", "Reserved sync branch has an unmanaged PR")
         return prs[0] if prs else None
+
+    def graphql(self, query, variables):
+        result = self.request("POST", "/graphql", {"query": query, "variables": variables})
+        # GraphQL reports failures inside a 200 response; withhold their messages like HTTP bodies.
+        if not isinstance(result, dict) or result.get("errors") or "data" not in result:
+            raise SyncError("github_api", "GitHub GraphQL request failed")
+        return result["data"]
+
+    def pr_mutation(self, name, pr):
+        self.graphql(f"mutation($id: ID!) {{ {name}(input: {{pullRequestId: $id}}) {{ clientMutationId }} }}",
+                     {"id": pr["node_id"]})
+
+    def enable_auto_merge(self, pr, head):
+        # The expected head binds auto-merge to the exact commit this run validated and pushed.
+        self.graphql("mutation($id: ID!, $head: GitObjectID!) { enablePullRequestAutoMerge(input: "
+                     "{pullRequestId: $id, mergeMethod: MERGE, expectedHeadOid: $head}) { clientMutationId } }",
+                     {"id": pr["node_id"], "head": checked_sha(head)})
 
 
 def checked_sha(value):
@@ -249,6 +267,11 @@ def checkout(source, destination, base, upstream):
     git(destination, "update-ref", "refs/upstream-sync/base", checked_sha(base))
 
 
+def automation_owned(pr):
+    """A draft or an auto-merge PR belongs to automation; disabling auto-merge hands it to a human."""
+    return bool(pr.get("draft") or pr.get("auto_merge"))
+
+
 def plan(api, source, repo, patch, *, retry):
     emit(active=False, resolve=False, review=False, issue="")
     base, upstream = api.main_sha(), api.upstream_sha()
@@ -256,8 +279,8 @@ def plan(api, source, repo, patch, *, retry):
     if base != os.environ["GITHUB_SHA"]:
         raise SyncError("stale_base", "Main advanced after this workflow was selected")
     pr = api.sync_pr()
-    if pr and not pr.get("draft"):
-        print("The existing sync PR is under review; leaving its branch unchanged.")
+    if pr and not automation_owned(pr):
+        print("The existing sync PR is under human review; leaving its branch unchanged.")
         return
     checkout(source, repo, base, upstream)
     try:
@@ -385,14 +408,14 @@ def validate(source, repo, patch, base, upstream):
     print(f"Candidate tree {candidate['tree']} passed nightly validation.")
 
 
-def publish(api, source, repo, patch, base, upstream):
+def publish(api, source, repo, patch, base, upstream, *, auto_merge):
     checkout(source, repo, base, upstream)
     candidate = materialize(repo, base, upstream, patch)
     if api.main_sha() != base:
         raise SyncError("stale_base", "Main advanced; refusing to publish stale validation")
     pr = api.sync_pr()
-    if pr and not pr.get("draft"):
-        raise SyncError("review_in_progress", "The existing PR is no longer a draft")
+    if pr and not automation_owned(pr):
+        raise SyncError("review_in_progress", "The existing PR is under human review")
     reference = api.repo("git/ref/heads/" + BRANCH, missing=True)
     previous = reference["object"]["sha"] if reference else ""
     if previous:
@@ -405,15 +428,30 @@ def publish(api, source, repo, patch, base, upstream):
     commit = git(repo, "commit-tree", candidate["tree"], "-p", base, "-p", upstream, "-m", message)
     if api.main_sha() != base:
         raise SyncError("stale_base", "Main advanced immediately before publication")
+    if pr and not pr.get("draft"):
+        # Withdraw a pending auto-merge before pushing, so it never applies to a commit
+        # (or a review-gated candidate) that this run did not explicitly approve.
+        if pr.get("auto_merge"):
+            api.pr_mutation("disablePullRequestAutoMerge", pr)
+        api.pr_mutation("convertPullRequestToDraft", pr)
     git(repo, "push", f"--force-with-lease=refs/heads/{BRANCH}:{previous}",
         f"https://github.com/{api.repository}.git", f"{commit}:refs/heads/{BRANCH}", auth=api.token)
     title = f"Sync upstream rustfmt ({upstream[:12]})"
+    if auto_merge:
+        merge_lines = [
+            "- Auto-merge (merge commit) merges this PR once the required PR checks pass.",
+            "- Disable auto-merge to take over review; automation then leaves this PR alone.",
+        ]
+    else:
+        merge_lines = [
+            "- The existing PR CI matrix must pass before a human merges this PR.",
+            "- Review FORK.md preservation and any workflow/release changes.",
+            "- Use a merge commit, not squash/rebase, to preserve upstream ancestry.",
+        ]
     body = "\n".join([
         PR_MARKER, "", f"Merge `{UPSTREAM}@{upstream}` into fork base `{base}`.", "",
         "- Secret-free Linux nightly validation passed before publication.",
-        "- The existing PR CI matrix must pass before a human merges this PR.",
-        "- Review FORK.md preservation and any workflow/release changes.",
-        "- Use a merge commit, not squash/rebase, to preserve upstream ancestry.",
+        *merge_lines,
         f"- Workflow run: {run_url()}", "",
         "This reserved branch is maintained by automation; do not add manual commits.",
     ])
@@ -424,15 +462,27 @@ def publish(api, source, repo, patch, base, upstream):
                                                 "base": "main", "draft": True, "maintainer_can_modify": False})
     if api.main_sha() != base:
         raise SyncError("stale_base", "Main advanced during publication; draft PR requires fresh validation")
+    if auto_merge:
+        try:
+            api.pr_mutation("markPullRequestReadyForReview", pr)
+            api.enable_auto_merge(pr, commit)
+        except SyncError:
+            # A ready PR without auto-merge would read as human-owned and stall future syncs.
+            with contextlib.suppress(SyncError):
+                api.pr_mutation("convertPullRequestToDraft", pr)
+            raise
     emit(pr_url=pr["html_url"])
-    print(f"Published draft PR #{pr['number']}; human review and full PR CI remain required.")
+    if auto_merge:
+        print(f"Published PR #{pr['number']} with auto-merge; it merges once required PR checks pass.")
+    else:
+        print(f"Published draft PR #{pr['number']}; human review and full PR CI remain required.")
 
 
 def report(api, base, upstream, issue_number, results, pr_url):
     issue = api.repo(f"issues/{issue_number}")
     state = decode_state(issue, base, upstream)
     if results.get("publish", {}).get("result") == "success":
-        update_state(api, issue, state, status="published", reason="Validated candidate published as a draft PR.",
+        update_state(api, issue, state, status="published", reason="Validated candidate published.",
                      pr_url=pr_url)
         return
     failed = [name for name, result in results.items() if result.get("result") in {"failure", "cancelled"}]
@@ -462,7 +512,9 @@ def main():
         if args.command == "plan":
             plan(api, args.source, args.repo, args.patch, retry=args.retry)
         elif args.command == "publish":
-            publish(api, args.source, args.repo, args.patch, checked_sha(args.base), checked_sha(args.upstream))
+            # Only syncs that need no review environment approval merge automatically.
+            publish(api, args.source, args.repo, args.patch, checked_sha(args.base), checked_sha(args.upstream),
+                    auto_merge=os.environ.get("REQUIRES_REVIEW") == "false")
         elif args.command == "check-environment":
             review = os.environ.get("REQUIRES_REVIEW") == "true"
             check_environment(api, "upstream-sync-review" if review else "upstream-sync", require_review=review)
