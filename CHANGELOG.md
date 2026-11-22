@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [1.12.5](https://github.com/zeon256/rustfmt/compare/v1.12.4...v1.12.5) - 2026-11-22
+
+### Fixed
+
+- *(ci)* accept `$/` self-repository refs in sync workflow lint
+- don't leave trailing whitespace before a skipped impl item
+
+### Other
+
+- Merge rust-lang/rustfmt main
+- Merge rust-lang/rustfmt main
+- snapshot current whitespace before a skipped impl item
+- Don't split link destinations when wrap_comments is enabled
+- rework `--print-config current` tests and add #[nightly_only_test] annotation
+
 ## [1.12.4](https://github.com/zeon256/rustfmt/compare/v1.12.3...v1.12.4) - 2026-11-08
 
 ### Other
