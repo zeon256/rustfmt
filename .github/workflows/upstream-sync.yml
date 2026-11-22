@@ -182,7 +182,7 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
           permission-workflows: write
-      - name: Reconstruct again and publish a draft PR with a branch lease
+      - name: Reconstruct again and publish the sync PR with a branch lease
         id: publish
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}

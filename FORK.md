@@ -177,9 +177,10 @@ file layout that upstream refactoring must retain.
 
 - **Origin:** the CI/CD change `oprlmvmt`, after the tracking baseline above.
 - **Required behavior:** integrate pinned upstream commits through a single
-  draft PR, preserving fork contracts and upstream ancestry. Resolve supported
+  PR, preserving fork contracts and upstream ancestry. Resolve supported
   conflicts with bounded OpenCode execution; never give the agent publishing
-  credentials, weaken preservation checks, or automatically merge the PR.
+  credentials or weaken preservation checks. Only syncs that need no review
+  environment approval merge automatically, and only after required PR checks pass.
 - **Implementation touchpoints:** [the scheduled workflow](.github/workflows/upstream-sync.yml),
   [Git verification](ci/upstream_sync/git_ops.py),
   [OpenCode isolation](ci/upstream_sync/agent.py), and
@@ -289,11 +290,12 @@ Preparation and the publisher check the environment protection through the API;
 missing or broader protection fails closed. For a sole maintainer, allow
 self-review if necessary to explicitly approve manually triggered runs.
 
-Protect `main` with human PR approval and required checks, including the existing
-`test conclusion` gate and the new `automation-tests` check. Keep the project's
-other required PR checks enabled. Do not enable squash/rebase merging for sync PRs.
-Configure these settings before landing/enabling the scheduled workflow, then
-exercise its manual trigger first.
+Allow auto-merge in the repository settings. In the `main` ruleset, require the
+`test conclusion`, `automation-tests`, clippy, `rustdoc check`, and non-allowed-failure
+integration checks from GitHub Actions, with a repository-admin pull-request bypass.
+Without required checks, auto-merge would merge a sync PR before CI runs. Keep
+merge commits enabled; do not squash or rebase sync PRs. Configure these settings
+before landing/enabling the scheduled workflow, then exercise its manual trigger first.
 
 ### Execution and review
 
@@ -356,11 +358,15 @@ is minted and the branch is published**.
 Review the linked artifact/diff and run before approving infrastructure changes:
 same-repository PR workflows can access repository-level credentials.
 
-The PR remains a draft. Review the diff and preservation results, require the full
-PR CI to pass, mark it ready, and merge it with a merge commit. Automation will not
-rewrite a PR that is already marked ready for human review. Do not add manual
-commits to the reserved automation branch; unexpected commits and branch races
-are rejected rather than overwritten.
+Syncs that need no review approval, including those with model-resolved conflicts,
+are published ready with auto-merge (merge commit) bound to the published commit,
+so they merge once the required PR checks pass. Review-gated syncs stay drafts:
+review the diff and preservation results, require the full PR CI to pass, mark the
+PR ready, and merge it with a merge commit. Automation owns a draft or auto-merge
+PR and withdraws auto-merge before every push. Disabling auto-merge on a ready PR,
+or marking a draft ready, hands it to a human; automation then leaves it alone.
+Do not add manual commits to the reserved automation branch; unexpected commits
+and branch races are rejected rather than overwritten.
 
 ### Budgets and failed runs
 
