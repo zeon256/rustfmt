@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [1.12.6](https://github.com/zeon256/rustfmt/compare/v1.12.5...v1.12.6) - 2026-11-23
+
+### Fixed
+
+- *(cfg_select)* respect `match_block_trailing_comma: true`
+
+### Other
+
+- Merge rust-lang/rustfmt main
+- *(cfg_select)* add tests for existing `cfg_select!` behavior
+
 ## [1.12.5](https://github.com/zeon256/rustfmt/compare/v1.12.4...v1.12.5) - 2026-11-22
 
 ### Fixed
