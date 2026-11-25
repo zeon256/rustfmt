@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.12.7](https://github.com/zeon256/rustfmt/compare/v1.12.6...v1.12.7) - 2026-11-25
+
+### Other
+
+- Merge rust-lang/rustfmt main
+- handle very large number of files
+- `cargo-fmt` add test helper to run `cargo fmt` with env
+
 ## [1.12.6](https://github.com/zeon256/rustfmt/compare/v1.12.5...v1.12.6) - 2026-11-23
 
 ### Fixed
